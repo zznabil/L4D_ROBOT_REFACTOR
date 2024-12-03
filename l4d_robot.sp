@@ -1,4 +1,3 @@
-//TODO: ALLOW UNLIMITED ROBOT GUNS PER PLAYER/CLIENT
 #pragma semicolon 1
 #include <sourcemod>
 #include <sdktools>
@@ -111,7 +110,6 @@ static int CIenemy[MAXPLAYERS+1];
 static float robotangle[MAXPLAYERS+1][3];
 
 // ConVar Handles
-static ConVar g_cvRobotLimit;
 static ConVar g_cvReactionTime;
 static ConVar g_cvScanRange;
 static ConVar g_cvEnergy;
@@ -268,12 +266,6 @@ public Plugin myinfo =
 
 public void OnPluginStart()
 {
-	g_cvRobotLimit = CreateConVar(
-		"l4d_robot_limit", "2",
-		"Number of Robots [0-3]",
-		FCVAR_NONE
-	);
-	
 	g_cvReactionTime = CreateConVar(
 		"l4d_robot_reactiontime", "2.0",
 		"Robot reaction time [0.5, 5.0]",
@@ -543,21 +535,6 @@ Action sm_robot(int client, int args)
 	if (RealValidEntity(robot[client]))
 	{
 		PrintToChat(client, "You already have a robot! Press WALK+USE to remove the old one.");
-		return Plugin_Handled;
-	}
-	
-	int count = 0;
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (RealValidEntity(robot[i]))
-		{
-			count++; 
- 		}
-	}
-	
-	if (count + 1 > GetConVarInt(g_cvRobotLimit))
-	{
-		PrintToChat(client, "No more robots to use!");
 		return Plugin_Handled;
 	}
 
