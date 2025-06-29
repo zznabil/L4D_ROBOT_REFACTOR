@@ -1027,10 +1027,11 @@ void LoadPlayerRobotConfig(int client)
 			break;
 		}
     }
-	g_bHasSavedConfig[client] = false;
+	g_bHasSavedConfig[client] = false; // Mark config as used/loaded
 }
 
-void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], float botOrigin[3])
+// FireBullet: enemyTargetPos and botOrigin are read-only.
+void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], const float botOrigin[3])
 {
     if (!IsValidClient(client) || !RealValidEntity(robots[client][robotIndex])) return;
         
@@ -1113,7 +1114,7 @@ void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], float
             }
         }
     }
-    EmitSoundToAll(SOUND[weapontypes[client][robotIndex]], robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_NORMAL, 0, SNDVOL_NORMAL, SNDPITCH_NORMAL, _, _, true); // Added missing parameters for EmitSoundToAll
+    EmitSoundToAll(SOUND[weapontypes[client][robotIndex]], robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_NORMAL, SND_NOFLAGS, SNDVOL_NORMAL, SNDPITCH_NORMAL, robots[client][robotIndex], botOrigin, NULL_VECTOR, true, 0.0);
 }
 
 float LerpAngle(float current, float target, float speed)
@@ -1124,7 +1125,7 @@ float LerpAngle(float current, float target, float speed)
     return current + diff * speed;
 }
 
-// Corrected: start and end should be const as they are not modified.
+// HasLineOfSight: start and end are read-only.
 bool HasLineOfSight(const float start[3], const float end[3])
 {
     Handle trace = TR_TraceRayFilterEx(start, end, MASK_VISIBLE_AND_NPCS, RayType_EndPoint, TraceRayDontHitSelfAndLiveFilterForLOS, -1);
