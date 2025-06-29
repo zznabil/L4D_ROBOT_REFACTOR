@@ -1031,7 +1031,7 @@ void LoadPlayerRobotConfig(int client)
 }
 
 // FireBullet: enemyTargetPos and botOrigin are read-only.
-void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], const float botOrigin[3])
+void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], const float botOrigin[3]) // botOrigin made const
 {
     if (!IsValidClient(client) || !RealValidEntity(robots[client][robotIndex])) return;
         
