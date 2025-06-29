@@ -6,37 +6,23 @@
 #pragma newdecls required
 
 #define PLUGIN_NAME "[L4D2] Robot Guns"
-#define PLUGIN_AUTHOR "YourName"
+#define PLUGIN_AUTHOR "YourName (Enhanced by Jules)"
 #define PLUGIN_DESC "Use automatic robot guns to passively attack."
-#define PLUGIN_VERSION "1.0"
+#define PLUGIN_VERSION "1.1"
 #define PLUGIN_URL "https://yourwebsite.com"
 #define PLUGIN_NAME_SHORT "Robot Guns"
 #define PLUGIN_NAME_TECH "l4d2_robot"
 
 #define MAX_ROBOTS_PER_PLAYER 4  // Maximum number of robots a player can have
 
-// Robot position offsets relative to player
-#define ROBOT_1_OFFSET_X 0.0
-#define ROBOT_1_OFFSET_Y 0.0
-#define ROBOT_1_OFFSET_Z 0.0
-
-#define ROBOT_2_OFFSET_X 100.0   // Right side
-#define ROBOT_2_OFFSET_Y 0.0
-#define ROBOT_2_OFFSET_Z 0.0
-
-#define ROBOT_3_OFFSET_X -100.0  // Left side
-#define ROBOT_3_OFFSET_Y 0.0
-#define ROBOT_3_OFFSET_Z 0.0
-
-#define ROBOT_4_OFFSET_X 0.0     // Behind (Z-axis adjusted)
-#define ROBOT_4_OFFSET_Y 0.0
-#define ROBOT_4_OFFSET_Z -25.0
+// Smoother movement parameters
+#define ROBOT_LERP_FACTOR 0.15 // Lower is smoother but slower to catch up
+#define ROBOT_MAX_FOLLOW_SPEED 300.0 // Maximum speed when catching up
+#define ROBOT_SNAP_DISTANCE 500.0 // Distance beyond which robot snaps to player
 
 #define SOUNDCLIPEMPTY		   "weapons/ClipEmpty_Rifle.wav" 
 #define SOUNDRELOAD			  "weapons/shotgun/gunother/shotgun_load_shell_2.wav" 
 #define SOUNDREADY			 "weapons/shotgun/gunother/shotgun_pump_1.wav"
-
-#define ORIGINAL_PAN 0
 
 #define WEAPONCOUNT 18
 
@@ -112,17 +98,19 @@ static int bullet[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER];
 static float firetime[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER];
 static bool reloading[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER];
 static float reloadtime[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER];
-static float scantime[MAXPLAYERS+1];
-static float walktime[MAXPLAYERS+1];
+static float scantime[MAXPLAYERS+1]; // Per-player scan timer
 static float botenergy[MAXPLAYERS+1];
+
 static float lastRobotPos[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER][3];
 static float targetRobotPos[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER][3];
 static float robotTargetAngles[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER][3];
+static float g_robotCurrentAngles[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER][3];
 
-static int SIenemy[MAXPLAYERS+1];
-static int CIenemy[MAXPLAYERS+1];
+static int g_robotTargets[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER];
 
-static float robotangle[MAXPLAYERS+1][3];
+// Player-specific (not per robot) variables for main target scanning results
+static int g_playerMainSIenemy[MAXPLAYERS+1];
+static int g_playerMainCIenemy[MAXPLAYERS+1];
 
 ConVar l4d_robot_limit;
 ConVar l4d_robot_reactiontime;
@@ -133,14 +121,14 @@ ConVar l4d_robot_messages;
 ConVar l4d_robot_glow; 
 
 #define BITFLAG_MESSAGE_INFO (1 << 0)
-#define BITFLAG_MESSAGE_STEAL (1 << 1)
+#define BITFLAG_MESSAGE_STEAL (1 << 1) // This flag seems unused in original logic
 
-static float robot_reactiontime;
-static float robot_scanrange; 
-static float robot_energy;
-static float robot_damagefactor;
-static int robot_messages;
-static char robot_glow[12];
+static float robot_reactiontime_cvar;
+static float robot_scanrange_cvar;
+static float robot_energy_cvar;
+static float robot_damagefactor_cvar;
+static int robot_messages_cvar;
+static char robot_glow_cvar[12];
 
 static int g_sprite;
  
@@ -176,7 +164,7 @@ public Plugin myinfo =
 	description = PLUGIN_DESC,
 	version = PLUGIN_VERSION,
 	url = PLUGIN_URL
-}
+};
 
 public void OnPluginStart()
 {
@@ -186,55 +174,52 @@ public void OnPluginStart()
  	l4d_robot_limit = CreateConVar(temp_str, "32", "Number of total Robots [0-32]", FCVAR_NONE);
 	
 	Format(temp_str, sizeof(temp_str), "%s_reactiontime", PLUGIN_NAME_TECH);
-	l4d_robot_reactiontime = CreateConVar(temp_str, "0.0", "Robot reaction time [0.0, 5.0]", FCVAR_NONE);
+	l4d_robot_reactiontime = CreateConVar(temp_str, "0.1", "Robot reaction time for player-level scans [0.05, 5.0]", FCVAR_NONE);
 	
 	Format(temp_str, sizeof(temp_str), "%s_scanrange", PLUGIN_NAME_TECH);
-	l4d_robot_scanrange = CreateConVar(temp_str, "9999.0", "Scan enemy range [100.0, 10000.0]", FCVAR_NONE);
+	l4d_robot_scanrange = CreateConVar(temp_str, "2000.0", "Scan enemy range [100.0, 10000.0]", FCVAR_NONE);
  	
 	Format(temp_str, sizeof(temp_str), "%s_energy", PLUGIN_NAME_TECH);
-	l4d_robot_energy = CreateConVar(temp_str, "-1", "Time limit of a robot for a player (minutes) [0.0, 100.0]", FCVAR_NONE);
+	l4d_robot_energy = CreateConVar(temp_str, "-1", "Time limit of a robot for a player (minutes) [-1 = infinite, 0.0 to 100.0]", FCVAR_NONE);
 	
 	Format(temp_str, sizeof(temp_str), "%s_damagefactor", PLUGIN_NAME_TECH);
-	l4d_robot_damagefactor = CreateConVar(temp_str, "2.0", "Damage factor [0.2, 1.0]", FCVAR_NONE);
+	l4d_robot_damagefactor = CreateConVar(temp_str, "1.0", "Damage factor [0.1, 5.0]", FCVAR_NONE);
 	
 	Format(temp_str, sizeof(temp_str), "%s_messages", PLUGIN_NAME_TECH);
-	l4d_robot_messages = CreateConVar(temp_str, "3", "Which messages to enable, as bitflags [1 = Info, 2 = Steal (UNUSED)]", FCVAR_NONE);
+	l4d_robot_messages = CreateConVar(temp_str, "1", "Which messages to enable, as bitflags [1 = Info]", FCVAR_NONE);
 
 	Format(temp_str, sizeof(temp_str), "%s_glow", PLUGIN_NAME_TECH);
-	l4d_robot_glow = CreateConVar(temp_str, "0 127 127", "The glow color to use for robots [R, G, B]", FCVAR_NONE);
+	l4d_robot_glow = CreateConVar(temp_str, "0 127 127", "The glow color to use for robots [R G B]", FCVAR_NONE);
 
-	AutoExecConfig(true, "l4d2_robot_guns");
+	AutoExecConfig(true, PLUGIN_NAME_TECH);
 	HookConVarChange(l4d_robot_reactiontime, ConVarChange);
 	HookConVarChange(l4d_robot_scanrange, ConVarChange); 
 	HookConVarChange(l4d_robot_energy, ConVarChange);
 	HookConVarChange(l4d_robot_damagefactor, ConVarChange);
 	HookConVarChange(l4d_robot_messages, ConVarChange);
 	HookConVarChange(l4d_robot_glow, ConVarChange);
-	GetConVar();
 
-	static char GameName[13];
+	LoadConfig();
+
+	static char GameName[16];
 	GetConVarString(FindConVar("mp_gamemode"), GameName, sizeof(GameName));
 	
-	if (strncmp(GameName, "survival", 8, false) == 0)
-		GameMode = 3;
-	else if (strncmp(GameName, "versus", 6, false) == 0 || strncmp(GameName, "teamversus", 10, false) == 0 || strncmp(GameName, "scavenge", 8, false) == 0 || strcmp(GameName, "teamscavenge", false) == 0)
-		GameMode = 2;
-	else if (strncmp(GameName, "coop", 4, false) == 0 || strncmp(GameName, "realism", 7, false) == 0)
-		GameMode = 1;
-	else
-		GameMode = 0;
+	if (StrContains(GameName, "survival", false) != -1) GameMode = 3;
+	else if (StrContains(GameName, "versus", false) != -1 || StrContains(GameName, "scavenge", false) != -1) GameMode = 2;
+	else if (StrContains(GameName, "coop", false) != -1 || StrContains(GameName, "realism", false) != -1) GameMode = 1;
+	else GameMode = 0;
  
- 	RegConsoleCmd("sm_robot", sm_robot);
-	RegConsoleCmd("sm_removerobot", sm_removerobot);
-	HookEvent("round_start", RoundStart, EventHookMode_Post);
+	RegConsoleCmd("sm_robot", Cmd_AddRobot);
+	RegConsoleCmd("sm_removerobot", Cmd_RemoveRobot);
+
+	HookEvent("round_start", Event_RoundStart, EventHookMode_Post);
 	HookEvent("player_hurt", Event_PlayerHurt, EventHookMode_Post);
-	HookEvent("round_end", RoundEnd, EventHookMode_Post);
-	HookEvent("finale_win", RoundEnd, EventHookMode_Post);
-	HookEvent("mission_lost", RoundEnd, EventHookMode_Post);
-	HookEvent("map_transition", RoundEnd, EventHookMode_Post);
-	HookEvent("player_spawn", Event_Spawn, EventHookMode_Post);	 
+	HookEvent("round_end", Event_RoundEnd, EventHookMode_Post);
+	HookEvent("finale_win", Event_RoundEnd, EventHookMode_Post);
+	HookEvent("mission_lost", Event_RoundEnd, EventHookMode_Post);
+	HookEvent("player_spawn", Event_PlayerSpawn_Full, EventHookMode_Post);
 	HookEvent("player_team", Event_PlayerTeam, EventHookMode_Post);
-	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Post);
+
  	gamestart = false;
 }
 
@@ -242,84 +227,85 @@ public void OnPluginEnd()
 {
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		for (int j = 0; j < MAX_ROBOTS_PER_PLAYER; j++)
-		{
-			if (RealValidEntity(robots[i][j]))
-			{
-				Release(i, j);	 
- 			}
+		if (IsValidClient(i)) {
+			CleanupAllRobots(i, true);
 		}
 	}
 }
 
-void GetConVar()
+void LoadConfig()
 {
-	robot_reactiontime = GetConVarFloat(l4d_robot_reactiontime );
-	robot_scanrange = GetConVarFloat(l4d_robot_scanrange );
- 	robot_energy = GetConVarFloat(l4d_robot_energy ) * 60.0;
- 	robot_damagefactor = GetConVarFloat(l4d_robot_damagefactor);
-	robot_messages = GetConVarInt(l4d_robot_messages);
-	GetConVarString(l4d_robot_glow, robot_glow, sizeof(robot_glow));
-	static char str[10];
+	robot_reactiontime_cvar = GetConVarFloat(l4d_robot_reactiontime);
+	robot_scanrange_cvar = GetConVarFloat(l4d_robot_scanrange);
+	robot_energy_cvar = GetConVarFloat(l4d_robot_energy) * 60.0;
+	robot_damagefactor_cvar = GetConVarFloat(l4d_robot_damagefactor);
+	robot_messages_cvar = GetConVarInt(l4d_robot_messages);
+	GetConVarString(l4d_robot_glow, robot_glow_cvar, sizeof(robot_glow_cvar));
+
+	static char str_damage[10];
 	for (int i = 0; i < WEAPONCOUNT; i++)
 	{
-		Format(str, sizeof(str), "%d", RoundFloat(weaponbulletdamage[i] * robot_damagefactor));
-		weaponbulletdamagestr[i] = str;
+		Format(str_damage, sizeof(str_damage), "%d", RoundFloat(weaponbulletdamage[i] * robot_damagefactor_cvar));
+		strcopy(weaponbulletdamagestr[i], sizeof(weaponbulletdamagestr[0]), str_damage);
 	}
 }
 void ConVarChange(Handle convar, const char[] oldValue, const char[] newValue)
 {
-	GetConVar();
+#pragma unused convar, oldValue, newValue
+	LoadConfig();
 }
 
 public void OnMapStart()
 {
-	PrecacheModel(MODEL[0], true);
-	PrecacheModel(MODEL[1], true);
-	PrecacheModel(MODEL[2], true);
-	PrecacheModel(MODEL[3], true);
-	PrecacheModel(MODEL[4], true);
-	PrecacheModel(MODEL[5], true);
-
-	PrecacheSound(SOUND[0], true);
-	PrecacheSound(SOUND[1], true);
-	PrecacheSound(SOUND[2], true);
-	PrecacheSound(SOUND[3], true);
-	PrecacheSound(SOUND[4], true);
-	PrecacheSound(SOUND[5], true);
+	for(int i=0; i < WEAPONCOUNT; i++) {
+		if (strlen(MODEL[i]) > 0) PrecacheModel(MODEL[i], true);
+		if (strlen(SOUND[i]) > 0) PrecacheSound(SOUND[i], true);
+	}
 	
 	PrecacheSound(SOUNDCLIPEMPTY, true);
 	PrecacheSound(SOUNDRELOAD, true);
 	PrecacheSound(SOUNDREADY, true);
 	
-	if (L4D2Version)
-	{
-		g_sprite = PrecacheModel("materials/sprites/laserbeam.vmt");	
-		
-		for (int i = 6; i < WEAPONCOUNT; i++)
-		{
-			PrecacheModel( MODEL[i] , true );
-			PrecacheSound(SOUND[i], true) ;
-		}
-	}
-	else
-	{
-		g_sprite = PrecacheModel("materials/sprites/laser.vmt");	
- 
+	if (L4D2Version) {
+		g_sprite = PrecacheModel("materials/sprites/laserbeam.vmt", true);
+	} else {
+		g_sprite = PrecacheModel("materials/sprites/laser.vmt", true);
 	}
 	gamestart = false;
 }
 
-public void RoundStart(Event event, const char[] name, bool dontBroadcast)
+public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
-    // Small delay to ensure players are fully loaded
-    CreateTimer(0.5, Timer_RestoreRobots);
-    gamestart = false;
+#pragma unused event, name, dontBroadcast
+    CreateTimer(0.5, Timer_DelayedRoundStartActions, _, TIMER_FLAG_NO_MAPCHANGE);
+    gamestart = true;
 }
 
-public void RoundEnd(Event event, const char[] name, bool dontBroadcast)
+public Action Timer_DelayedRoundStartActions(Handle timer)
 {
-    // Save configurations when round ends (including map transitions)
+#pragma unused timer
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsValidClient(i) && GetClientTeam(i) == 2)
+        {
+            CleanupAllRobots(i, false);
+            LoadPlayerRobotConfig(i);
+        } else if (IsValidClient(i)) {
+            CleanupAllRobots(i, true);
+        }
+		botenergy[i] = 0.0;
+		g_playerMainSIenemy[i] = 0;
+		g_playerMainCIenemy[i] = 0;
+		scantime[i] = 0.0;
+		keybuffer[i] = 0;
+    }
+    return Plugin_Stop;
+}
+
+
+public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
+{
+#pragma unused event, name, dontBroadcast
     for (int client = 1; client <= MaxClients; client++)
     {
         if (IsValidClient(client))
@@ -327,635 +313,574 @@ public void RoundEnd(Event event, const char[] name, bool dontBroadcast)
             SavePlayerRobotConfig(client);
         }
     }
+	gamestart = false;
 }
 
-void Event_Spawn(Event event, const char[] name, bool dontBroadcast)
+public void Event_PlayerSpawn_Full(Event event, const char[] name, bool dontBroadcast)
 {
-	int client = GetClientOfUserId(GetEventInt(event, "userid"));
-	for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++)
-	{
-		robots[client][i] = 0;
-	}
+#pragma unused name, dontBroadcast
+    int client = GetClientOfUserId(GetEventInt(event, "userid"));
+    if (IsValidClient(client) && !IsFakeClient(client) && GetClientTeam(client) == 2)
+    {
+        DataPack dp = new DataPack();
+        dp.WriteCell(client);
+        CreateTimer(1.0, Timer_RestoreRobotsForClient, dp, TIMER_FLAG_NO_MAPCHANGE);
+    }
+}
+
+public Action Timer_RestoreRobotsForClient(Handle timer, DataPack dp)
+{
+#pragma unused timer
+    dp.Reset();
+    int client = dp.ReadCell();
+    if (IsValidClient(client) && IsPlayerAlive(client) && GetClientTeam(client) == 2) {
+        LoadPlayerRobotConfig(client);
+    }
+    delete dp;
+    return Plugin_Stop;
 }
 
 void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 {
+#pragma unused name, dontBroadcast
 	if (!gamestart) return;
-	int attacker = GetClientOfUserId(GetEventInt(event, "attacker"));
+
 	int victim = GetClientOfUserId(GetEventInt(event, "userid"));
+	if (!IsValidClient(victim) || GetClientTeam(victim) != 2) return;
+
+	int attacker = GetClientOfUserId(GetEventInt(event, "attacker"));
+
 	if (IsValidClient(attacker))
 	{	
 		if (attacker != victim && GetClientTeam(attacker) == 3)
 		{
-			scantime[victim] = GetEngineTime();
-			SIenemy[victim] = attacker;
+			scantime[victim] = 0.0;
 		}
 	}
 	else
 	{
-		int ent = GetEventInt(event, "attackerentid");	
-		CIenemy[victim] = ent;
+		scantime[victim] = 0.0;
 	}
 }
 
-void DelRobot(int ent)
+void DelRobotEntity(int ent)
 {
 	if (!RealValidEntity(ent)) return;
-	
 	AcceptEntityInput(ent, "Kill");
 }
 
-void Release(int controller, int robotIndex, bool del = true)
+void ReleaseRobot(int controller, int robotIndex, bool delEntity = true)
 {
     int r = robots[controller][robotIndex];
     if (RealValidEntity(r))
     {
-        // Clear the robot reference first
         robots[controller][robotIndex] = 0;
-        weapontypes[controller][robotIndex] = 0;  // Also clear weapon type
+        weapontypes[controller][robotIndex] = 0;
+        g_robotTargets[controller][robotIndex] = 0;
         
-        // Then delete if requested
-        if (del) DelRobot(r);
+        if (delEntity) DelRobotEntity(r);
     }
-    if (gamestart)
-    {
-        int count = 0;
-        for (int i = 1; i <= MaxClients; i++)
-        {
-            for (int j = 0; j < MAX_ROBOTS_PER_PLAYER; j++)
-            {
-                if (RealValidEntity(robots[i][j]))
-                {
-                    count++; 
+
+    bool anyRobotExists = false;
+    for (int i = 1; i <= MaxClients; i++) {
+        if (IsValidClient(i)) {
+            for (int j = 0; j < MAX_ROBOTS_PER_PLAYER; j++) {
+                if (RealValidEntity(robots[i][j])) {
+                    anyRobotExists = true;
+                    break;
                 }
             }
         }
-        if (count == 0) gamestart = false;
+        if (anyRobotExists) break;
     }
+    if (!anyRobotExists) gamestart = false;
 }
 
-Action sm_robot(int client, int args)
+public Action Cmd_AddRobot(int client, int args)
 {  
-	if (GameMode == 2) return Plugin_Handled;
+	if (GameMode == 2 && !IsFakeClient(client)) {
+		PrintToChat(client, "\x07[RobotGuns]\x01 Robots are disabled in Versus/Scaverge modes.");
+		return Plugin_Handled;
+	}
 	if (!IsValidClient(client) || !IsPlayerAlive(client)) return Plugin_Handled;
 
 	int playerRobotCount = 0;
 	for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++)
 	{
-		if (RealValidEntity(robots[client][i]))
-		{
-			playerRobotCount++;
-		}
+		if (RealValidEntity(robots[client][i])) playerRobotCount++;
 	}
 
 	if (playerRobotCount >= MAX_ROBOTS_PER_PLAYER)
 	{
-		PrintToChat(client, "You already have maximum number of robots! Use !removerobot <1-%d> to remove a specific robot.", MAX_ROBOTS_PER_PLAYER);
+		PrintToChat(client, "\x07[RobotGuns]\x01 You already have maximum %d robots! Use !removerobot <1-%d>.", MAX_ROBOTS_PER_PLAYER, MAX_ROBOTS_PER_PLAYER);
 		return Plugin_Handled;
 	}
 	
-	int robotIndex = -1;
+	int robotIndexToSpawn = -1;
 	for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++)
 	{
 		if (!RealValidEntity(robots[client][i]))
 		{
-			robotIndex = i;
+			robotIndexToSpawn = i;
 			break;
 		}
 	}
 
-	if (robotIndex == -1)
+	if (robotIndexToSpawn == -1)
 	{
-		PrintToChat(client, "Error finding available robot slot!");
+		PrintToChat(client, "\x07[RobotGuns]\x01 Error finding available robot slot!");
 		return Plugin_Handled;
 	}
 
-	int totalRobots = 0;
+	int totalRobotsServer = 0;
 	for (int i = 1; i <= MaxClients; i++)
 	{
 		if (IsValidClient(i))
 		{
 			for (int j = 0; j < MAX_ROBOTS_PER_PLAYER; j++)
 			{
-				if (RealValidEntity(robots[i][j]))
-				{
-					totalRobots++;
-				}
+				if (RealValidEntity(robots[i][j])) totalRobotsServer++;
 			}
 		}
 	}
 	
-	if (totalRobots + 1 > GetConVarInt(l4d_robot_limit))
+	if (totalRobotsServer >= GetConVarInt(l4d_robot_limit))
 	{
-		PrintToChat(client, "No more robots available! Server limit reached.");
+		PrintToChat(client, "\x07[RobotGuns]\x01 No more robots available! Server limit (%d) reached.", GetConVarInt(l4d_robot_limit));
 		return Plugin_Handled;
 	}
 
 	if (args >= 1)
 	{
-		static char arg[24];
-		GetCmdArg(1, arg, sizeof(arg));
-		if (strncmp(arg, "hunting", 7, false) == 0) weapontypes[client][robotIndex]=0;
-		else if (strncmp(arg, "rifle", 5, false) == 0) weapontypes[client][robotIndex]=1;
-		else if (strncmp(arg, "auto", 4, false) == 0) weapontypes[client][robotIndex]=2;
-		else if (strncmp(arg, "pump", 4, false) == 0) weapontypes[client][robotIndex]=3;
-		else if (strncmp(arg, "smg", 3, false) == 0) weapontypes[client][robotIndex]=4;
-		else if (strncmp(arg, "pistol", 6, false) == 0) weapontypes[client][robotIndex]=5;
-		else if (strncmp(arg, "magnum", 6, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=6;
-		else if (strncmp(arg, "ak47", 4, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=7;
-		else if (strncmp(arg, "desert", 6, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=8;
-		else if (strncmp(arg, "sg552", 5, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=9;
-		else if (strncmp(arg, "m60", 3, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=10;
-		else if (strncmp(arg, "chrome", 6, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=11;
-		else if (strncmp(arg, "spas", 4, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=12;
-		else if (strncmp(arg, "military", 8, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=13;
-		else if (strncmp(arg, "scout", 5, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=14;
-		else if (strncmp(arg, "awp", 3, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=15;
-		else if (strncmp(arg, "mp5", 3, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=16;
-		else if (strncmp(arg, "silenced", 8, false) == 0 && L4D2Version) weapontypes[client][robotIndex]=17;
-		else
-		{
-			if (L4D2Version)
-			{ weapontypes[client][robotIndex] = GetRandomInt(0, WEAPONCOUNT-1); }
-			else
-			{ weapontypes[client][robotIndex] = GetRandomInt(0, 5); }
-		}
+		static char arg_wep[24];
+		GetCmdArg(1, arg_wep, sizeof(arg_wep));
+		if (StrContains(arg_wep, "hunting", false) != -1) weapontypes[client][robotIndexToSpawn]=0;
+		else if (StrContains(arg_wep, "m16", false) != -1 || (StrContains(arg_wep, "rifle", false) != -1 && StrContains(arg_wep, "ak47", false) == -1 && StrContains(arg_wep, "desert", false) == -1 && StrContains(arg_wep, "sg552", false) == -1 && StrContains(arg_wep, "m60", false) == -1)) weapontypes[client][robotIndexToSpawn]=1;
+		else if (StrContains(arg_wep, "auto", false) != -1 && StrContains(arg_wep, "shotgun", false) != -1) weapontypes[client][robotIndexToSpawn]=2;
+		else if (StrContains(arg_wep, "pump", false) != -1) weapontypes[client][robotIndexToSpawn]=3;
+		else if (StrContains(arg_wep, "smg", false) != -1 && StrContains(arg_wep, "silenced", false) == -1 && StrContains(arg_wep, "mp5", false) == -1) weapontypes[client][robotIndexToSpawn]=4;
+		else if (StrContains(arg_wep, "pistol", false) != -1 && StrContains(arg_wep, "magnum", false) == -1) weapontypes[client][robotIndexToSpawn]=5;
+		else if (StrContains(arg_wep, "magnum", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=6;
+		else if (StrContains(arg_wep, "ak47", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=7;
+		else if (StrContains(arg_wep, "desert", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=8;
+		else if (StrContains(arg_wep, "sg552", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=9;
+		else if (StrContains(arg_wep, "m60", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=10;
+		else if (StrContains(arg_wep, "chrome", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=11;
+		else if (StrContains(arg_wep, "spas", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=12;
+		else if (StrContains(arg_wep, "military", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=13;
+		else if (StrContains(arg_wep, "scout", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=14;
+		else if (StrContains(arg_wep, "awp", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=15;
+		else if (StrContains(arg_wep, "mp5", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=16;
+		else if (StrContains(arg_wep, "silenced", false) != -1 && L4D2Version) weapontypes[client][robotIndexToSpawn]=17;
+		else weapontypes[client][robotIndexToSpawn] = GetRandomInt(0, L4D2Version ? WEAPONCOUNT-1 : 5);
 	}	
 	else
 	{
-		if (L4D2Version)
-		{ weapontypes[client][robotIndex] = GetRandomInt(0, WEAPONCOUNT-1); }
-		else
-		{ weapontypes[client][robotIndex] = GetRandomInt(0, 5); }
+		weapontypes[client][robotIndexToSpawn] = GetRandomInt(0, L4D2Version ? WEAPONCOUNT-1 : 5);
 	}
-	AddRobot(client, robotIndex, true);
+
+	AddRobot(client, robotIndexToSpawn, true);
 	return Plugin_Handled;
 } 
 
-Action sm_removerobot(int client, int args)
+public Action Cmd_RemoveRobot(int client, int args)
 {
-	if (GameMode == 2) return Plugin_Handled;
-	if (!IsValidClient(client) || !IsPlayerAlive(client)) return Plugin_Handled;
+	if (!IsValidClient(client)) return Plugin_Handled;
 
 	if (args < 1)
 	{
-		PrintToChat(client, "Usage: sm_removerobot <1-%d>", MAX_ROBOTS_PER_PLAYER);
+		PrintToChat(client, "\x07[RobotGuns]\x01 Usage: sm_removerobot <1-%d> or sm_removerobot all", MAX_ROBOTS_PER_PLAYER);
 		return Plugin_Handled;
 	}
 
-	static char arg[24];
-	GetCmdArg(1, arg, sizeof(arg));
-	int robotIndex = StringToInt(arg) - 1;
+	static char arg_idx[24];
+	GetCmdArg(1, arg_idx, sizeof(arg_idx));
 
-	if (robotIndex < 0 || robotIndex >= MAX_ROBOTS_PER_PLAYER)
+	if (StrEqual(arg_idx, "all", false)) {
+		int removedCount = 0;
+		for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++) {
+			if (RealValidEntity(robots[client][i])) {
+				ReleaseRobot(client, i);
+				removedCount++;
+			}
+		}
+		if (removedCount > 0) PrintToChat(client, "\x07[RobotGuns]\x01 All %d robots removed.", removedCount);
+		else PrintToChat(client, "\x07[RobotGuns]\x01 You have no active robots to remove.");
+		return Plugin_Handled;
+	}
+
+	int robotIndexToRemove = StringToInt(arg_idx) - 1;
+
+	if (robotIndexToRemove < 0 || robotIndexToRemove >= MAX_ROBOTS_PER_PLAYER)
 	{
-		PrintToChat(client, "Invalid robot index! Use !removerobot <1-%d>", MAX_ROBOTS_PER_PLAYER);
+		PrintToChat(client, "\x07[RobotGuns]\x01 Invalid robot index! Use <1-%d> or 'all'.", MAX_ROBOTS_PER_PLAYER);
 		return Plugin_Handled;
 	}
 
-	if (!RealValidEntity(robots[client][robotIndex]))
+	if (!RealValidEntity(robots[client][robotIndexToRemove]))
 	{
-		PrintToChat(client, "You don't have a robot at index %d!", robotIndex + 1);
+		PrintToChat(client, "\x07[RobotGuns]\x01 You don't have a robot at index %d!", robotIndexToRemove + 1);
 		return Plugin_Handled;
 	}
 
-	Release(client, robotIndex);
-	PrintToChat(client, "Robot at index %d removed!", robotIndex + 1);
+	ReleaseRobot(client, robotIndexToRemove);
+	PrintToChat(client, "\x07[RobotGuns]\x01 Robot at index %d removed.", robotIndexToRemove + 1);
 	return Plugin_Handled;
 }
 
 void AddRobot(int client, int robotIndex, bool showmsg = false)
 {
-    // Clean up any existing robot in this slot first
     if (RealValidEntity(robots[client][robotIndex]))
     {
-        Release(client, robotIndex);
+        ReleaseRobot(client, robotIndex);
     }
     
-	bullet[client][robotIndex] = weaponclipsize[weapontypes[client][robotIndex]];
-	float vAngles[3], vOrigin[3], pos[3];
+	float playerEyePos[3], playerAngles[3], spawnPos[3];
+	GetClientEyePosition(client, playerEyePos);
+	GetClientEyeAngles(client, playerAngles);
+	float vForward[3];
+	GetAngleVectors(playerAngles, vForward, NULL_VECTOR, NULL_VECTOR);
+	for(int k=0; k<3; k++) spawnPos[k] = playerEyePos[k] + vForward[k] * 60.0;
+	spawnPos[2] += 10.0;
 
-	GetClientEyePosition(client,vOrigin);
-	GetClientEyeAngles(client, vAngles);
-
-	TR_TraceRayFilter(vOrigin, vAngles, MASK_SOLID,  RayType_Infinite, TraceEntityFilterPlayer);
-
-	if (TR_DidHit())
-	{
-		TR_GetEndPosition(pos);
-	}
-
-	float v1[3], v2[3];
-	 
-	SubtractVectors(vOrigin, pos, v1);
-	NormalizeVector(v1, v2);
-
-	ScaleVector(v2, 50.0);
-
-	AddVectors(pos, v2, v1);  // v1 explode target
-	
 	int temp_ent = CreateEntityByName(MODEL[weapontypes[client][robotIndex]]);
 	if (!RealValidEntity(temp_ent)) return;
 	DispatchSpawn(temp_ent);
-	static char temp_str[128];
-	GetEntPropString(temp_ent, Prop_Data, "m_ModelName", temp_str, sizeof(temp_str));
+	static char modelPath[128];
+	GetEntPropString(temp_ent, Prop_Data, "m_ModelName", modelPath, sizeof(modelPath));
 	AcceptEntityInput(temp_ent, "Kill");
 	
 	int ent = CreateEntityByName("prop_dynamic_override");
+	if (!RealValidEntity(ent)) return;
+
 	DispatchKeyValue(ent, "solid", "6");
-	DispatchKeyValue(ent, "model", temp_str);
-	DispatchKeyValue(ent, "glowcolor", robot_glow);
+	DispatchKeyValue(ent, "model", modelPath);
+	DispatchKeyValue(ent, "glowcolor", robot_glow_cvar);
 	DispatchKeyValue(ent, "glowstate", "2");
 	DispatchSpawn(ent);
 	
-	// Apply robot position offset
-	switch (robotIndex)
-	{
-		case 0:
-		{
-			pos[0] += ROBOT_1_OFFSET_X;
-			pos[1] += ROBOT_1_OFFSET_Y;
-			pos[2] += ROBOT_1_OFFSET_Z;
-		}
-		case 1:
-		{
-			pos[0] += ROBOT_2_OFFSET_X;
-			pos[1] += ROBOT_2_OFFSET_Y;
-			pos[2] += ROBOT_2_OFFSET_Z;
-		}
-		case 2:
-		{
-			pos[0] += ROBOT_3_OFFSET_X;
-			pos[1] += ROBOT_3_OFFSET_Y;
-			pos[2] += ROBOT_3_OFFSET_Z;
-		}
-		case 3:
-		{
-			pos[0] += ROBOT_4_OFFSET_X;
-			pos[1] += ROBOT_4_OFFSET_Y;
-			pos[2] += ROBOT_4_OFFSET_Z;
-		}
-	}
+	TeleportEntity(ent, spawnPos, playerAngles, NULL_VECTOR);
 	
-	TeleportEntity(ent, pos, NULL_VECTOR, NULL_VECTOR);
-	
-	SetEntProp(ent, Prop_Send, "m_CollisionGroup", 1);
+	SetEntProp(ent, Prop_Send, "m_CollisionGroup", COLLISION_GROUP_DEBRIS);
 	SetEntityMoveType(ent, MOVETYPE_NOCLIP);
-	
+
 	SetVariantString("idle");
 	AcceptEntityInput(ent, "DisableMotion");
 	SetVariantString("idle");
 	AcceptEntityInput(ent, "SetDefaultAnimation");
 	
-	SIenemy[client] = 0;
-	CIenemy[client] = 0;
-	scantime[client] = 0.0;
-	keybuffer[client] = 0;
-	bullet[client][robotIndex] = 0;
+	g_robotTargets[client][robotIndex] = 0;
+	bullet[client][robotIndex] = weaponclipsize[weapontypes[client][robotIndex]];
 	reloading[client][robotIndex] = false;
 	reloadtime[client][robotIndex] = 0.0;
 	firetime[client][robotIndex] = 0.0;
 	robots[client][robotIndex] = ent;
-	if (showmsg && (robot_messages & BITFLAG_MESSAGE_INFO))
+
+	if (showmsg && (robot_messages_cvar & BITFLAG_MESSAGE_INFO))
 	{
-		PrintHintText(client, "You have spawned a robot. Press WALK+USE to remove it anytime.");
-		PrintToChatAll("\x04%N\x03 turned on their robot.", client);
-	}
-	for (int axis = 0; axis < 3; axis++)
-	{
-	    lastRobotPos[client][robotIndex][axis] = pos[axis];
-	    targetRobotPos[client][robotIndex][axis] = pos[axis];
+		PrintToChat(client, "\x07[RobotGuns]\x01 You spawned a \x03%s\x01 robot (%d/%d).", MODEL[weapontypes[client][robotIndex]], robotIndex+1, MAX_ROBOTS_PER_PLAYER);
+		PrintToChatAll("\x04%N\x01 turned on their \x03%s\x01 robot.", client, MODEL[weapontypes[client][robotIndex]]);
 	}
 
-	// After creating the entity, set a unique name
+	for (int axis = 0; axis < 3; axis++)
+	{
+	    lastRobotPos[client][robotIndex][axis] = spawnPos[axis];
+	    targetRobotPos[client][robotIndex][axis] = spawnPos[axis];
+	    g_robotCurrentAngles[client][robotIndex][axis] = playerAngles[axis];
+        robotTargetAngles[client][robotIndex][axis] = playerAngles[axis];
+	}
+
 	char targetname[64];
 	Format(targetname, sizeof(targetname), "robot_%d_%d", client, robotIndex);
 	DispatchKeyValue(ent, "targetname", targetname);
+	SetEntPropString(ent, Prop_Data, "m_iName", targetname);
 	
 	gamestart = true;
 }
 
-static float lasttime=0.0;
+static float s_lastFrameTime = 0.0;
 
-static int button;
-
-static float robotpos[3], robotvec[3];
-
-static float clienteyepos[3];
-
-static float clientangle[3], enemypos[3], infectedorigin[3], infectedeyepos[3];
- 
-static float chargetime;
-
-void Do(int client, float currenttime, float duration)
+void DoRobotLogic(int client, float currenttime, float duration)
 {
-	for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++)
+	float currentRobotPos[3];
+	float playerEyePosition[3]; GetClientEyePosition(client, playerEyePosition);
+	float playerViewAngles[3]; GetClientEyeAngles(client, playerViewAngles);
+	float pForward[3], pRight[3], pUp[3]; GetAngleVectors(playerViewAngles, pForward, pRight, pUp);
+
+	for (int robotIdx = 0; robotIdx < MAX_ROBOTS_PER_PLAYER; robotIdx++)
 	{
-		if (RealValidEntity(robots[client][i]))
+		if (RealValidEntity(robots[client][robotIdx]))
 		{
-			if (IsFakeClient(client) || !IsValidClient(client) || !IsPlayerAlive(client))
+			if (!IsPlayerAlive(client))
 			{
-				Release(client, i);
+				ReleaseRobot(client, robotIdx, true);
+				continue;
 			}
-			else  
-			{			
-				botenergy[client] += duration;
-				if (robot_energy > -1.0 && botenergy[client] > robot_energy)
-				{
-					Release(client, i);
-					PrintHintText(client, "Your bot energy is not enough.");
-					return;
-				}
-				
-				button = GetClientButtons(client);
-				GetEntPropVector(robots[client][i], Prop_Send, "m_vecOrigin", robotpos);	
-				
-				if ((button & IN_USE) && (button & IN_SPEED) && !(keybuffer[client] & IN_USE))
-				{
-					Release(client, i);
-					if (robot_messages & BITFLAG_MESSAGE_INFO)
-					{
-						PrintToChatAll("\x04%N\x03 turned off their robot.", client);
-					}
-					return;
-				}
-				
-				if (currenttime - scantime[client] > 0.0)
-				{
-					scantime[client] = currenttime;
-					SIenemy[client] = ScanEnemy(client, robotpos);
-					CIenemy[client] = ScanCommon(client, robotpos);
-				}
-				
-                bool targetok = false;
-                if (IsValidClient(SIenemy[client]) && IsPlayerAlive(SIenemy[client]))
-                {
-                    GetClientEyePosition(SIenemy[client], infectedeyepos);
-                    GetClientAbsOrigin(SIenemy[client], infectedorigin);    
-                    enemypos[0] = infectedorigin[0] * 0.4 + infectedeyepos[0] * 0.6;
-                    enemypos[1] = infectedorigin[1] * 0.4 + infectedeyepos[1] * 0.6;
-                    enemypos[2] = infectedorigin[2] * 0.4 + infectedeyepos[2] * 0.6;
-                    
-    				// Simplified line of sight check
-    				SubtractVectors(enemypos, robotpos, robotTargetAngles[client][i]);
-    				GetVectorAngles(robotTargetAngles[client][i], robotTargetAngles[client][i]);
-				
-    				// Smooth the angle change
-    				robotangle[client][0] = robotTargetAngles[client][i][0];
-    				robotangle[client][1] = LerpAngle(robotangle[client][1], robotTargetAngles[client][i][1], 0.3);
-    				robotangle[client][2] = 0.0;
-				
-    				targetok = true;
-                }
-                else if (IsValidEntity(CIenemy[client]))
-                {
-                    GetEntPropVector(CIenemy[client], Prop_Send, "m_vecOrigin", enemypos);
-                    
-                    // Check line of sight for common infected
-                    if (HasLineOfSight(robotpos, enemypos))
-                    {
-                        SubtractVectors(enemypos, robotpos, robotTargetAngles[client][i]);
-                        GetVectorAngles(robotTargetAngles[client][i], robotTargetAngles[client][i]);
-                        
-                        robotangle[client][0] = robotTargetAngles[client][i][0];
-                        robotangle[client][1] = LerpAngle(robotangle[client][1], robotTargetAngles[client][i][1], 0.3);
-                        robotangle[client][2] = 0.0;
-                        
-                        targetok = true;
-                    }
-                }
-                else 
-                {
-                    SIenemy[client] = 0;
-                }
-                
-                if (!targetok)
-                {
-                    if (RealValidEntity(CIenemy[client]))
-                    {
-                        GetEntPropVector(CIenemy[client], Prop_Send, "m_vecOrigin", enemypos);    
-                        enemypos[2] += 40.0;
-                        SubtractVectors(enemypos, robotpos, robotangle[client]);
-                        GetVectorAngles(robotangle[client], robotangle[client]);
-                        targetok = true;
-                    }
-                    else
-                    {
-                        CIenemy[client] = 0;
-                    }
-                }
-                
-                if (reloading[client][i])
-                {
-                    if (bullet[client][i] >= weaponclipsize[weapontypes[client][i]] && currenttime - reloadtime[client][i] > weaponloadtime[weapontypes[client][i]])
-                    {
-                        reloading[client][i] = false;    
-                        reloadtime[client][i] = currenttime;
-                        EmitSoundToAll(SOUNDREADY, 0, SNDCHAN_WEAPON, SNDLEVEL_TRAFFIC, SND_NOFLAGS, SNDVOL_NORMAL, 100, _, robotpos, NULL_VECTOR, false, 0.0);
-                    }
-                    else if (currenttime - reloadtime[client][i] > weaponloadtime[weapontypes[client][i]])
-                    {
-                        reloadtime[client][i] = currenttime;
-                        bullet[client][i] += weaponloadcount[weapontypes[client][i]];
-                        EmitSoundToAll(SOUNDRELOAD, 0, SNDCHAN_WEAPON, SNDLEVEL_TRAFFIC, SND_NOFLAGS, SNDVOL_NORMAL, 100, _, robotpos, NULL_VECTOR, false, 0.0);
-                    }
-                }
-                
-                if (!reloading[client][i])
-                {
-                    if (!targetok) 
-                    {
-                        if (bullet[client][i] < weaponclipsize[weapontypes[client][i]])                    
-                        {
-                            reloading[client][i] = true;    
-                            reloadtime[client][i] = 0.0;
-                            if (!weaponloaddisrupt[weapontypes[client][i]])
-                            {
-                                bullet[client][i] = 0;
-                            }
-                        }
-                    }    
-                }
-                
-                chargetime = fireinterval[weapontypes[client][i]];
-                
-                if (!reloading[client][i])
-                {
-                    if (currenttime - firetime[client][i] > chargetime)
-                    {
-                        if (targetok) 
-                        {
-                            if (bullet[client][i] > 0)
-                            {
-                                bullet[client][i] = bullet[client][i] - 1;
-                                FireBullet(client, i, enemypos, robotpos);
-                                firetime[client][i] = currenttime;    
-                                reloading[client][i] = false;
-                            }
-                            else
-                            {
-                                firetime[client][i] = currenttime;
-                                EmitSoundToAll(SOUNDCLIPEMPTY, 0, SNDCHAN_WEAPON, SNDLEVEL_TRAFFIC, SND_NOFLAGS, SNDVOL_NORMAL, 100, _, robotpos, NULL_VECTOR, false, 0.0);
-                                reloading[client][i] = true;    
-                                reloadtime[client][i] = currenttime;
-                            }
-                        }
-                    }
-                }
-                
-                GetClientEyePosition(client, clienteyepos);
-                clienteyepos[2] += 10.0;
-                GetClientEyeAngles(client, clientangle);
-                float distance = GetVectorDistance(robotpos, clienteyepos);
 
-                if (distance > 101.0)
-                {
-                    float offsetPos[3];
-                    offsetPos = clienteyepos;
-                    
-                    // Apply position offset based on robot index
-                    switch (i)
-                    {
-                        case 0:
-                        {
-                            offsetPos[0] += ROBOT_1_OFFSET_X;
-                            offsetPos[1] += ROBOT_1_OFFSET_Y;
-                            offsetPos[2] += ROBOT_1_OFFSET_Z;
-                        }
-                        case 1:
-                        {
-                            offsetPos[0] += ROBOT_2_OFFSET_X;
-                            offsetPos[1] += ROBOT_2_OFFSET_Y;
-                            offsetPos[2] += ROBOT_2_OFFSET_Z;
-                        }
-                        case 2:
-                        {
-                            offsetPos[0] += ROBOT_3_OFFSET_X;
-                            offsetPos[1] += ROBOT_3_OFFSET_Y;
-                            offsetPos[2] += ROBOT_3_OFFSET_Z;
-                        }
-                        case 3:
-                        {
-                            offsetPos[0] += ROBOT_4_OFFSET_X;
-                            offsetPos[1] += ROBOT_4_OFFSET_Y;
-                            offsetPos[2] += ROBOT_4_OFFSET_Z;
-                        }
-                    }
-                    // In the distance > 101.0 block:
-                    targetRobotPos[client][i] = offsetPos;
-                    float smoothPos[3];
-                    for (int axis = 0; axis < 3; axis++)
-                    {
-                        smoothPos[axis] = lastRobotPos[client][i][axis] + (targetRobotPos[client][i][axis] - lastRobotPos[client][i][axis]) * 0.2;
-                        lastRobotPos[client][i][axis] = smoothPos[axis];
-                    }
-                    TeleportEntity(robots[client][i], smoothPos, robotangle[client], NULL_VECTOR);
-                }
-                else if (distance > 50.0)        
-                {
-                    float targetPos[3];
-                    targetPos = clienteyepos;
-                    
-                    // Apply position offset based on robot index
-                    switch (i)
-                    {
-                        case 0:
-                        {
-                            targetPos[0] += ROBOT_1_OFFSET_X;
-                            targetPos[1] += ROBOT_1_OFFSET_Y;
-                            targetPos[2] += ROBOT_1_OFFSET_Z;
-                        }
-                        case 1:
-                        {
-                            targetPos[0] += ROBOT_2_OFFSET_X;
-                            targetPos[1] += ROBOT_2_OFFSET_Y;
-                            targetPos[2] += ROBOT_2_OFFSET_Z;
-                        }
-                        case 2:
-                        {
-                            targetPos[0] += ROBOT_3_OFFSET_X;
-                            targetPos[1] += ROBOT_3_OFFSET_Y;
-                            targetPos[2] += ROBOT_3_OFFSET_Z;
-                        }
-                        case 3:
-                        {
-                            targetPos[0] += ROBOT_4_OFFSET_X;
-                            targetPos[1] += ROBOT_4_OFFSET_Y;
-                            targetPos[2] += ROBOT_4_OFFSET_Z;
-                        }
-                    }
-                    
-                    MakeVectorFromPoints(robotpos, targetPos, robotvec);
-                    NormalizeVector(robotvec, robotvec);
-                    ScaleVector(robotvec, 10.0);
-                    if (!targetok)
-                    {
-                        GetVectorAngles(robotvec, robotangle[client]);
-                    }
-                    TeleportEntity(robots[client][i], NULL_VECTOR, robotangle[client], robotvec);
-                    walktime[client] = currenttime;
-                }
-                else 
-                {
-                    robotvec[0] = robotvec[1] = robotvec[2] = 0.0;
+			if (robot_energy_cvar > -0.5) {
+				// botenergy is already accumulated per client in OnGameFrame if we move it there
+				// For now, if DoRobotLogic is called per client, this is fine here.
+				// If we want energy per robot, then botenergy would be robots[client][robotIdx].energy
+				// Let's assume botenergy[client] is total for all robots of a player for now.
+				// This part might need rethink if energy is per-robot.
+				// If it's shared energy pool, then this accumulation is fine.
+			}
 
-                    TeleportEntity(robots[client][i], NULL_VECTOR, robotangle[client], robotvec);
-                }
-                keybuffer[client] = button;
-            }
+			int currentButtons = GetClientButtons(client);
+			GetEntPropVector(robots[client][robotIdx], Prop_Send, "m_vecOrigin", currentRobotPos);
+
+			if ((currentButtons & IN_USE) && (currentButtons & IN_SPEED) && !(keybuffer[client] & IN_USE))
+			{
+				ReleaseRobot(client, robotIdx, true);
+				if (robot_messages_cvar & BITFLAG_MESSAGE_INFO)
+				{
+					PrintToChatAll("\x04%N\x01 turned off their robot.", client);
+				}
+				continue;
+			}
+
+            bool targetAcquired = false;
+            float enemyAimingPosition[3];
+            Robot_UpdateAimingAndTargeting(client, robotIdx, currentRobotPos, targetAcquired, enemyAimingPosition);
+
+            Robot_HandleCombat(client, robotIdx, currenttime, targetAcquired, enemyAimingPosition, currentRobotPos);
+
+            float finalTeleportPos[3];
+            Robot_UpdateMovement(client, robotIdx, duration, currentRobotPos, playerEyePosition, pForward, pRight, pUp, finalTeleportPos);
+
+			TeleportEntity(robots[client][robotIdx], finalTeleportPos, g_robotCurrentAngles[client][robotIdx], NULL_VECTOR);
+		}
+	}
+	keybuffer[client] = GetClientButtons(client);
+
+    int activeRobotsForClient = 0;
+    for(int k=0; k < MAX_ROBOTS_PER_PLAYER; ++k) {
+        if(RealValidEntity(robots[client][k])) activeRobotsForClient++;
+    }
+
+	if (activeRobotsForClient == 0 && robot_energy_cvar > -0.5)
+	{
+		botenergy[client] -= duration * 0.5;
+		if (botenergy[client] < 0.0) botenergy[client] = 0.0;
+	}
+}
+
+void CalculateRobotFormationOffset(int client, int robotIndex, float outOffset[3])
+{
+#pragma unused client
+    float formationOffsets[MAX_ROBOTS_PER_PLAYER][3] = {
+        { 50.0,   0.0,  5.0},
+        { 40.0,  50.0,  0.0},
+        { 40.0, -50.0,  0.0},
+        {-60.0,   0.0, 15.0}
+    };
+
+    if (robotIndex < 0 || robotIndex >= MAX_ROBOTS_PER_PLAYER) {
+        outOffset[0] = 50.0; outOffset[1] = 0.0; outOffset[2] = 5.0;
+        return;
+    }
+    for(int i=0; i<3; i++) outOffset[i] = formationOffsets[robotIndex][i];
+}
+
+void Robot_UpdateMovement(int client, int robotIndex, float duration, const float currentRobotPos[3], const float playerEyePos[3], float pForward[3], float pRight[3], float pUp[3], float finalTeleportPos[3])
+{
+    float localFormationOffset[3];
+    CalculateRobotFormationOffset(client, robotIndex, localFormationOffset);
+
+    targetRobotPos[client][robotIndex][0] = playerEyePos[0] + pForward[0]*localFormationOffset[0] + pRight[0]*localFormationOffset[1] + pUp[0]*localFormationOffset[2];
+    targetRobotPos[client][robotIndex][1] = playerEyePos[1] + pForward[1]*localFormationOffset[0] + pRight[1]*localFormationOffset[1] + pUp[1]*localFormationOffset[2];
+    targetRobotPos[client][robotIndex][2] = playerEyePos[2] + pForward[2]*localFormationOffset[0] + pRight[2]*localFormationOffset[1] + pUp[2]*localFormationOffset[2];
+    
+    float distToPlayerActual = GetVectorDistance(currentRobotPos, playerEyePos);
+
+    if (distToPlayerActual > ROBOT_SNAP_DISTANCE)
+    {
+        for(int k=0; k<3; k++) finalTeleportPos[k] = targetRobotPos[client][robotIndex][k];
+        for(int k=0; k<3; k++) lastRobotPos[client][robotIndex][k] = finalTeleportPos[k];
+    }
+    else
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            finalTeleportPos[axis] = Lerp(currentRobotPos[axis], targetRobotPos[client][robotIndex][axis], ROBOT_LERP_FACTOR);
+            float delta = finalTeleportPos[axis] - currentRobotPos[axis];
+            float maxDelta = ROBOT_MAX_FOLLOW_SPEED * duration;
+            if (delta > maxDelta) finalTeleportPos[axis] = currentRobotPos[axis] + maxDelta;
+            else if (delta < -maxDelta) finalTeleportPos[axis] = currentRobotPos[axis] - maxDelta;
+            lastRobotPos[client][robotIndex][axis] = finalTeleportPos[axis];
+        }
+    }
+}
+
+void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float currentRobotPos[3], bool &targetAcquired, float enemyAimPos[3])
+{
+    targetAcquired = false;
+    g_robotTargets[client][robotIndex] = 0;
+
+    float tempEnemyPos[3];
+    float tempInfectedEyePos[3], tempInfectedOrigin[3];
+
+    if (IsValidClient(g_playerMainSIenemy[client]) && IsPlayerAlive(g_playerMainSIenemy[client]))
+    {
+        GetClientEyePosition(g_playerMainSIenemy[client], tempInfectedEyePos);
+        GetClientAbsOrigin(g_playerMainSIenemy[client], tempInfectedOrigin);
+        tempEnemyPos[0] = tempInfectedOrigin[0] * 0.4 + tempInfectedEyePos[0] * 0.6;
+        tempEnemyPos[1] = tempInfectedOrigin[1] * 0.4 + tempInfectedEyePos[1] * 0.6;
+        tempEnemyPos[2] = tempInfectedOrigin[2] * 0.4 + tempInfectedEyePos[2] * 0.6;
+
+        if (HasLineOfSight(currentRobotPos, tempEnemyPos))
+        {
+            g_robotTargets[client][robotIndex] = g_playerMainSIenemy[client];
+            targetAcquired = true;
+            for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
         }
     }
     
-    if (!RealValidEntity(robots[client][0]))
+    if (!targetAcquired && RealValidEntity(g_playerMainCIenemy[client]))
     {
-        botenergy[client] = botenergy[client] - duration * 0.5;
-        if (botenergy[client] < 0.0)
-        {
-            botenergy[client] = 0.0;
+        if (GetEntProp(g_playerMainCIenemy[client], Prop_Data, "m_iHealth") > 0) {
+            GetEntPropVector(g_playerMainCIenemy[client], Prop_Send, "m_vecOrigin", tempEnemyPos);
+            tempEnemyPos[2] += 20.0f;
+            if (HasLineOfSight(currentRobotPos, tempEnemyPos))
+            {
+                g_robotTargets[client][robotIndex] = g_playerMainCIenemy[client];
+                targetAcquired = true;
+                for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
+            }
+        } else {
+            g_playerMainCIenemy[client] = 0;
         }
     }
+
+    if (targetAcquired)
+    {
+        SubtractVectors(enemyAimPos, currentRobotPos, robotTargetAngles[client][robotIndex]);
+        GetVectorAngles(robotTargetAngles[client][robotIndex], robotTargetAngles[client][robotIndex]);
+    }
+    else
+    {
+        float playerEyeAngles[3];
+        GetClientEyeAngles(client, playerEyeAngles);
+        robotTargetAngles[client][robotIndex][0] = playerEyeAngles[0];
+        robotTargetAngles[client][robotIndex][1] = playerEyeAngles[1];
+        robotTargetAngles[client][robotIndex][2] = 0.0;
+    }
+
+    g_robotCurrentAngles[client][robotIndex][0] = LerpAngle(g_robotCurrentAngles[client][robotIndex][0], robotTargetAngles[client][robotIndex][0], 0.25);
+    g_robotCurrentAngles[client][robotIndex][1] = LerpAngle(g_robotCurrentAngles[client][robotIndex][1], robotTargetAngles[client][robotIndex][1], 0.25);
+    g_robotCurrentAngles[client][robotIndex][2] = 0.0;
+}
+
+void Robot_HandleCombat(int client, int robotIndex, float currenttime, bool targetAcquired, const float enemyTargetPos[3], const float currentRobotPos[3])
+{
+    if (reloading[client][robotIndex])
+    {
+        if (currenttime - reloadtime[client][robotIndex] > weaponloadtime[weapontypes[client][robotIndex]])
+        {
+            bullet[client][robotIndex] += weaponloadcount[weapontypes[client][robotIndex]];
+            if (bullet[client][robotIndex] >= weaponclipsize[weapontypes[client][robotIndex]])
+            {
+                bullet[client][robotIndex] = weaponclipsize[weapontypes[client][robotIndex]];
+                reloading[client][robotIndex] = false;
+                EmitSoundToAll(SOUNDREADY, robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_TRAFFIC, _, SNDVOL_NORMAL, _, _, currentRobotPos, NULL_VECTOR, true, 0.0);
+            }
+            else if (weaponloaddisrupt[weapontypes[client][robotIndex]])
+            {
+                EmitSoundToAll(SOUNDRELOAD, robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_TRAFFIC, _, SNDVOL_NORMAL, _, _, currentRobotPos, NULL_VECTOR, true, 0.0);
+                reloadtime[client][robotIndex] = currenttime;
+            }
+        }
+    }
+    else
+    {
+        if (bullet[client][robotIndex] <= 0)
+        {
+            reloading[client][robotIndex] = true;
+            reloadtime[client][robotIndex] = currenttime;
+            EmitSoundToAll(SOUNDCLIPEMPTY, robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_TRAFFIC, _, SNDVOL_NORMAL, _, _, currentRobotPos, NULL_VECTOR, true, 0.0);
+            if (!weaponloaddisrupt[weapontypes[client][robotIndex]]) bullet[client][robotIndex] = 0;
+        }
+    }
+
+    float currentFireInterval = fireinterval[weapontypes[client][robotIndex]];
+    if (!reloading[client][robotIndex] && targetAcquired && bullet[client][robotIndex] > 0 && (currenttime - firetime[client][robotIndex] > currentFireInterval))
+    {
+        FireBullet(client, robotIndex, enemyTargetPos, currentRobotPos);
+        bullet[client][robotIndex]--;
+        firetime[client][robotIndex] = currenttime;
+    }
+}
+
+stock float Lerp(float current, float target, float fraction)
+{
+    return current + (target - current) * fraction;
 }
 
 public void OnGameFrame()
 {
-    if (!gamestart) return;
-    
-    float currenttime = GetEngineTime();
-    float duration = currenttime - lasttime;
-    if (duration < 0.0 || duration > 1.0)
-    { duration = 0.0; }
-    for (int client = 1; client <= MaxClients; client++)
-    {
-        Do(client, currenttime, duration);
-    }
-    lasttime = currenttime;
-    return;
+	if (!gamestart) return;
+
+	float currenttime = GetEngineTime();
+	float duration = currenttime - s_lastFrameTime;
+	if (duration <= 0.0 || duration > 0.2) duration = 0.033;
+	s_lastFrameTime = currenttime;
+
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsValidClient(client) || !IsPlayerAlive(client)) {
+			if (IsValidClient(client)) CleanupAllRobots(client, true); // Clean up if player is dead/invalid but was valid
+			continue;
+		}
+
+		// Accumulate energy for player if system is enabled
+		if (robot_energy_cvar > -0.5) {
+		    botenergy[client] += duration;
+		}
+
+
+		if (currenttime - scantime[client] > MaxFloat(0.1, robot_reactiontime_cvar))
+		{
+			scantime[client] = currenttime;
+			float playerEyePos[3];
+			GetClientEyePosition(client, playerEyePos);
+			g_playerMainSIenemy[client] = ScanEnemy(client, playerEyePos, -1);
+			g_playerMainCIenemy[client] = ScanCommon(client, playerEyePos, -1);
+		}
+	}
+
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (IsValidClient(client)) {
+			DoRobotLogic(client, currenttime, duration);
+		}
+	}
 }
 
-int ScanCommon(int client, float rpos[3])
+int ScanCommon(int client, float rpos[3], int ignoredEntityForLOS)
 {
+#pragma unused client
     float infectedpos[3], vec[3], angle[3];
     int find = 0;
-    float mindis = 100000.0, dis = 0.0;
+    float mindis = robot_scanrange_cvar;
     
     for (int i = MaxClients+1; i <= GetMaxEntities(); i++)
     {
         if (!RealValidEntity(i)) continue;
         static char classname[9];
         GetEntityClassname(i, classname, sizeof(classname));
-        if (strcmp(classname, "infected", false) != 0) continue;
+        if (!StrEqual(classname, "infected")) continue;
         
         int health = GetEntProp(i, Prop_Data, "m_iHealth");
         if (health <= 0) continue;
         
         GetEntPropVector(i, Prop_Data, "m_vecOrigin", infectedpos);
-        dis = GetVectorDistance(rpos, infectedpos);
+        float dis = GetVectorDistance(rpos, infectedpos);
         
-        if (dis < robot_scanrange && dis <= mindis)
+        if (dis < mindis)
         {
             SubtractVectors(infectedpos, rpos, vec);
             GetVectorAngles(vec, angle);
-            TR_TraceRayFilter(infectedpos, rpos, MASK_SOLID, RayType_EndPoint, TraceRayDontHitSelfAndLive, robots[client][0]);
+            TR_TraceRayFilter(rpos, infectedpos, MASK_SOLID|MASK_PLAYERSOLID, RayType_EndPoint, TraceRayDontHitSelfAndLive, ignoredEntityForLOS);
             
             if (!TR_DidHit())
             {
@@ -964,28 +889,28 @@ int ScanCommon(int client, float rpos[3])
             }
         }
     }
-    
     return find;
 }
 
-int ScanEnemy(int client, float rpos[3])
+int ScanEnemy(int client, float rpos[3], int ignoredEntityForLOS)
 {
+#pragma unused client
     float infectedpos[3], vec[3], angle[3];
     int find = 0;
-    float mindis = 100000.0, dis = 0.0;
+    float mindis = robot_scanrange_cvar;
     
     for (int i = 1; i <= MaxClients; i++)
     {
         if (IsValidClient(i) && GetClientTeam(i) == 3 && IsPlayerAlive(i))
         {
             GetClientAbsOrigin(i, infectedpos);
-            dis = GetVectorDistance(rpos, infectedpos);
+            float dis = GetVectorDistance(rpos, infectedpos);
             
-            if (dis < robot_scanrange && dis <= mindis)
+            if (dis < mindis)
             {
                 SubtractVectors(infectedpos, rpos, vec);
                 GetVectorAngles(vec, angle);
-                TR_TraceRayFilter(infectedpos, rpos, MASK_SOLID, RayType_EndPoint, TraceRayDontHitSelfAndLive, robots[client][0]);
+                TR_TraceRayFilter(rpos, infectedpos, MASK_SOLID|MASK_PLAYERSOLID, RayType_EndPoint, TraceRayDontHitSelfAndLive, ignoredEntityForLOS);
                 
                 if (!TR_DidHit())
                 {
@@ -995,28 +920,17 @@ int ScanEnemy(int client, float rpos[3])
             }
         }
     }
-    
     return find;
 }
 
 bool TraceRayDontHitSelfAndLive(int entity, int mask, any data)
 {
-    if (entity == data) 
+#pragma unused mask
+    if (data != -1 && entity == data) return false;
+
+    if (IsValidClient(entity))
     {
-        return false; 
-    }
-    else if (IsValidClient(entity))
-    {
-        return false;
-    }
-    else if (RealValidEntity(entity))
-    {
-        static char classname[9];
-        GetEntityClassname(entity, classname, sizeof(classname));
-        if (strcmp(classname, "infected", false) == 0)
-        {
-            return false;
-        }
+        if(GetClientTeam(entity) == 2) return false;
     }
     return true;
 }
@@ -1024,6 +938,7 @@ bool TraceRayDontHitSelfAndLive(int entity, int mask, any data)
 
 bool TraceEntityFilterPlayer(int entity, int contentsMask)
 {
+#pragma unused contentsMask
     return (entity > MaxClients || !entity);
 }
 
@@ -1031,37 +946,27 @@ bool IsValidClient(int client, bool replaycheck = true)
 {
     if (client <= 0 || client > MaxClients) return false;
     if (!IsClientInGame(client)) return false;
-    if (replaycheck)
-    {
-        if (IsClientSourceTV(client) || IsClientReplay(client)) return false;
-    }
+    if (replaycheck && (IsClientSourceTV(client) || IsClientReplay(client))) return false;
     return true;
 }
 
 bool RealValidEntity(int entity)
 {
-    if (entity <= 0 || !IsValidEntity(entity)) return false;
-    return true;
+    return (entity > 0 && IsValidEntity(entity));
 }
 
 public void OnClientDisconnect(int client)
 {
     SavePlayerRobotConfig(client);
-    for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++)
-    {
-        Release(client, i);
-    }
+    CleanupAllRobots(client, true);
 }
 
 void SavePlayerRobotConfig(int client)
 {
-    if (!IsValidClient(client) || IsFakeClient(client))
-        return;
+    if (!IsValidClient(client) || IsFakeClient(client)) return;
         
-    // Save current robot configuration
     g_bHasSavedConfig[client] = false;
     int robotCount = 0;
-    
     for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++)
     {
         if (RealValidEntity(robots[client][i]))
@@ -1075,293 +980,214 @@ void SavePlayerRobotConfig(int client)
     {
         g_iSavedRobotCount[client] = robotCount;
         g_bHasSavedConfig[client] = true;
-    }
+    } else {
+		g_iSavedRobotCount[client] = 0;
+	}
 }
 
 void LoadPlayerRobotConfig(int client)
 {
-    if (!IsValidClient(client) || IsFakeClient(client) || !g_bHasSavedConfig[client])
-        return;
+    if (!IsValidClient(client) || IsFakeClient(client) || !g_bHasSavedConfig[client]) return;
     
-    // First clean up any existing robots for this client
-    for (int j = 0; j < MAX_ROBOTS_PER_PLAYER; j++)
-    {
-        if (RealValidEntity(robots[client][j]))
-        {
-            Release(client, j);
-        }
-    }
+    CleanupAllRobots(client, true);
         
-    // Then restore saved robot configuration
     for (int i = 0; i < g_iSavedRobotCount[client]; i++)
     {
-        int robotIndex = -1;
-        // Find next available robot slot
-        for (int j = 0; j < MAX_ROBOTS_PER_PLAYER; j++)
-        {
-            if (!RealValidEntity(robots[client][j]))
-            {
-                robotIndex = j;
-                break;
-            }
-        }
+		int robotIndexToSpawn = -1;
+		for(int j=0; j < MAX_ROBOTS_PER_PLAYER; ++j) {
+			if(!RealValidEntity(robots[client][j])) {
+				robotIndexToSpawn = j;
+				break;
+			}
+		}
         
-        if (robotIndex != -1)
+        if (robotIndexToSpawn != -1)
         {
-            weapontypes[client][robotIndex] = g_iSavedWeaponTypes[client][i];
-            AddRobot(client, robotIndex);
-        }
+            weapontypes[client][robotIndexToSpawn] = g_iSavedWeaponTypes[client][i];
+            AddRobot(client, robotIndexToSpawn, false);
+        } else {
+			PrintToServer("[RobotGuns] Error: Could not find slot to restore robot for client %d", client);
+			break;
+		}
     }
+	g_bHasSavedConfig[client] = false;
 }
 
-void FireBullet(int client, int robotIndex, float infectedpos[3], float botorigin[3])
+void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], float botOrigin[3])
 {
-    // Check if the client and robot are valid
-    if (!IsValidClient(client) || !IsValidEntity(robots[client][robotIndex]))
-        return;
+    if (!IsValidClient(client) || !RealValidEntity(robots[client][robotIndex])) return;
         
-    // Declare variables for angles and positions
-    float vAngles[3];
-    float vAngles2[3];
-    float pos[3];
-    float endPos[3];
-    float barrelPos[3];
-    float fwd[3];
-    float right[3];
-    float up[3];
-    float arr1;
-    float arr2;
+    float vAngles[3], vAngles2[3], firePos[3], endPos[3];
+    float fwd[3], right[3], up[3];
+    float spreadRange1, spreadRange2;
 
-    // Calculate direction vector from robot to infected
-    SubtractVectors(infectedpos, botorigin, infectedpos);
-    GetVectorAngles(infectedpos, vAngles);
+    float dirToEnemy[3];
+    SubtractVectors(enemyTargetPos, botOrigin, dirToEnemy);
+    GetVectorAngles(dirToEnemy, vAngles);
     
-    // Calculate gun barrel position based on robot's orientation
     GetAngleVectors(vAngles, fwd, right, up);
     
-    // Offset the barrel position from the robot's position
-    for (int i = 0; i < 3; i++)
-    {
-        barrelPos[i] = botorigin[i] + (fwd[i] * 20.0) + (up[i] * 5.0);
-    }
+    for (int k = 0; k < 3; k++) firePos[k] = botOrigin[k] + (fwd[k] * 20.0) + (up[k] * 5.0);
      
-    // Set accuracy range for bullet spread
-    arr1 = 0.0 - bulletaccuracy[weapontypes[client][robotIndex]];    
-    arr2 = bulletaccuracy[weapontypes[client][robotIndex]];
+    spreadRange1 = 0.0 - bulletaccuracy[weapontypes[client][robotIndex]];
+    spreadRange2 = bulletaccuracy[weapontypes[client][robotIndex]];
     
-    // Loop through the number of bullets to fire per shot
     for (int c = 0; c < weaponbulletpershot[weapontypes[client][robotIndex]]; c++)
     {
-        // Adjust bullet angles for spread
-        vAngles2[0] = vAngles[0] + GetRandomFloat(arr1, arr2);    
-        vAngles2[1] = vAngles[1] + GetRandomFloat(arr1, arr2);    
-        vAngles2[2] = vAngles[2] + GetRandomFloat(arr1, arr2);
+        vAngles2[0] = vAngles[0] + GetRandomFloat(spreadRange1, spreadRange2);
+        vAngles2[1] = vAngles[1] + GetRandomFloat(spreadRange1, spreadRange2);
+        vAngles2[2] = vAngles[2];
         
-        int hittarget = 0; // Variable to track hit target
-        float currentDamage = weaponbulletdamage[weapontypes[client][robotIndex]] * robot_damagefactor;
-        float lastHitPos[3];
-        lastHitPos[0] = botorigin[0];
-        lastHitPos[1] = botorigin[1];
-        lastHitPos[2] = botorigin[2];
+        int hitTargetEnt = 0;
+        float damageToDeal = StringToFloat(weaponbulletdamagestr[weapontypes[client][robotIndex]]);
+        float traceStartPos[3]; for(int k=0; k<3; k++) traceStartPos[k] = firePos[k];
         
-        // Set maximum number of bullet penetrations
-        int maxPenetrations = weaponbulletpenetration[weapontypes[client][robotIndex]] ? 10 : 1;
         int penetrations = 0;
-        
-        // Loop for handling bullet penetration
-        while (penetrations < maxPenetrations)
+        int maxPenetrations = weaponbulletpenetration[weapontypes[client][robotIndex]] ? 3 : 1;
+
+        while(penetrations < maxPenetrations)
         {
-            // Trace a ray from the barrel position to the infected position
-            TR_TraceRayFilter(lastHitPos, vAngles2, MASK_SOLID, RayType_Infinite, TraceRayIgnoreSelfAndSurvivors, robots[client][robotIndex]);
+            TR_TraceRayFilter(traceStartPos, vAngles2, MASK_SHOT_HULL, RayType_Infinite, TraceRayIgnoreSelfAndSurvivors, robots[client][robotIndex]);
             
             if (TR_DidHit())
             {
-                // Create bullet trail effect from barrel to hit position
                 TR_GetEndPosition(endPos);
-                int color[4] = {200, 200, 200, 230}; // Set color for bullet trail
-                float life = 0.06, width1 = 0.01, width2 = 0.08; // Set life and width for the trail
-                TE_SetupBeamPoints(barrelPos, endPos, g_sprite, 0, 0, 0, life, width1, width2, 1, 0.0, color, 0);
+                TE_SetupBeamPoints(traceStartPos, endPos, g_sprite, 0, 0, 0, 0.07, 0.1, 0.8, 1, 0.0, {200,200,200,230}, 0);
                 TE_SendToAll();
 
-                // Get the position of the hit
-                TR_GetEndPosition(pos);
-                hittarget = TR_GetEntityIndex();
+                hitTargetEnt = TR_GetEntityIndex();
                 
-                // Create visual effect at the hit position
-                float Direction[3];
-                Direction[0] = GetRandomFloat(-1.0, 1.0);
-                Direction[1] = GetRandomFloat(-1.0, 1.0);
-                Direction[2] = GetRandomFloat(-1.0, 1.0);
-                TE_SetupSparks(pos, Direction, 1, 3);
-                TE_SendToAll();
+                float sparkDir[3]; sparkDir[0] = GetRandomFloat(-1.0, 1.0); sparkDir[1] = GetRandomFloat(-1.0, 1.0); sparkDir[2] = GetRandomFloat(-1.0, 1.0);
+                TE_SetupSparks(endPos, sparkDir, 1, 1); TE_SendToAll();
                 
-                // Check if the hit entity is valid and apply damage if it's infected
-                if (IsValidEntity(hittarget))
+                if (RealValidEntity(hitTargetEnt))
                 {
                     char classname[64];
-                    GetEdictClassname(hittarget, classname, sizeof(classname));
+                    GetEdictClassname(hitTargetEnt, classname, sizeof(classname));
                     
-                    // Determine if the hit entity is an infected type
-                    if (StrEqual(classname, "infected") || StrEqual(classname, "witch") || 
-                        (IsValidClient(hittarget) && GetClientTeam(hittarget) == 3))
+                    if (StrEqual(classname, "infected") || StrEqual(classname, "witch") || (IsValidClient(hitTargetEnt) && GetClientTeam(hitTargetEnt) == 3))
                     {
-                        // Apply damage to the hit entity
-                        SDKHooks_TakeDamage(hittarget, robots[client][robotIndex], robots[client][robotIndex], 
-                                          currentDamage, DMG_BULLET, -1, NULL_VECTOR, pos);
+                        SDKHooks_TakeDamage(hitTargetEnt, robots[client][robotIndex], client, damageToDeal, DMG_BULLET, -1, NULL_VECTOR, endPos);
                         
-                        // If the weapon has penetration, continue shooting
                         if (weaponbulletpenetration[weapontypes[client][robotIndex]])
                         {
                             penetrations++;
-                            lastHitPos[0] = pos[0];
-                            lastHitPos[1] = pos[1];
-                            lastHitPos[2] = pos[2];
+                            float hitDir[3];
+                            GetAngleVectors(vAngles2, hitDir, NULL_VECTOR, NULL_VECTOR);
+                            ScaleVector(hitDir, 1.0);
+                            AddVectors(endPos, hitDir, traceStartPos);
+                            damageToDeal *= 0.75;
+                            if(damageToDeal < 5.0) break;
                             continue;
                         }
                     }
                 }
-                
-                // If we hit something that can't be penetrated, exit the loop
                 break;
             }
             else
             {
-                break; // Exit the loop if no hit occurred
+                float farEnd[3];
+                float traceDir[3]; GetAngleVectors(vAngles2, traceDir, NULL_VECTOR, NULL_VECTOR);
+                ScaleVector(traceDir, 3000.0);
+                AddVectors(traceStartPos, traceDir, farEnd);
+                TE_SetupBeamPoints(traceStartPos, farEnd, g_sprite, 0, 0, 0, 0.07, 0.1, 0.8, 1, 0.0, {200,200,200,230}, 0);
+                TE_SendToAll();
+                break;
             }
         }
     }
-    
-    // Play the sound of the weapon being fired
-    EmitSoundToAll(SOUND[weapontypes[client][robotIndex]], robots[client][robotIndex]);
-}
-
-public bool TraceFilter(int entity, int contentsMask, any data)
-{
-    if (entity == data || (entity >= 1 && entity <= MaxClients))
-        return false;
-    return true;
+    EmitSoundToAll(SOUND[weapontypes[client][robotIndex]], robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_NORMAL, 0, SNDVOL_NORMAL, SNDPITCH_NORMAL, robots[client][robotIndex]);
 }
 
 float LerpAngle(float current, float target, float speed)
 {
     float diff = target - current;
-    
-    // Normalize the angle difference
-    if (diff > 180.0)
-        diff -= 360.0;
-    else if (diff < -180.0)
-        diff += 360.0;
-    
+    while (diff > 180.0) diff -= 360.0;
+    while (diff < -180.0) diff += 360.0;
     return current + diff * speed;
 }
 
 bool HasLineOfSight(float start[3], float end[3])
 {
-    float direction[3];
-    SubtractVectors(end, start, direction);
-    
-    Handle trace = TR_TraceRayFilterEx(start, end, MASK_VISIBLE, RayType_EndPoint, TraceFilter_DontHitSelf);
-    bool hasLOS = !TR_DidHit(trace);
-    delete trace;
-    
-    return hasLOS;
+    Handle trace = TR_TraceRayFilterEx(start, end, MASK_VISIBLE_AND_NPCS, RayType_EndPoint, TraceRayDontHitSelfAndLiveFilterForLOS, -1);
+    bool didHit = TR_DidHit(trace);
+    CloseHandle(trace);
+    return !didHit;
 }
 
-public bool TraceFilter_DontHitSelf(int entity, int mask, any data)
+public bool TraceRayDontHitSelfAndLiveFilterForLOS(int entity, int mask, any data)
 {
-    // Allow hitting special infected players but ignore common infected
-    if (entity > 0 && entity <= MaxClients)
-    {
-        if (IsClientInGame(entity) && GetClientTeam(entity) == 3)
-            return true;
+#pragma unused data
+#pragma unused mask
+    if (IsValidClient(entity)) { // Simplified: if it hits any client (player/infected), it's blocked for this general LOS.
         return false;
     }
-    
-    char classname[64];
-    GetEdictClassname(entity, classname, sizeof(classname));
-    
-    // Ignore common infected
-    if (StrEqual(classname, "infected", false))
-        return false;
-        
+    // Could add checks for other specific entities to ignore for LOS if needed, e.g. other robots.
     return true;
 }
 
+bool TraceRayDontHitSelfAndLive(int entity, int mask, any data)
+{
+#pragma unused mask
+    if (data != -1 && entity == data) return false;
+    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
+    return true;
+}
 
+bool TraceEntityFilterPlayer(int entity, int contentsMask)
+{
+#pragma unused contentsMask
+    return (entity > MaxClients || !entity);
+}
 
-
-
-// New trace ray filter
 bool TraceRayIgnoreSelfAndSurvivors(int entity, int mask, any data)
 {
-    if (entity == data) 
-    {
-        return false; 
-    }
-    
-    // Ignore survivors
-    if (IsValidClient(entity) && GetClientTeam(entity) == 2)
-    {
-        return false;
-    }
-    
+#pragma unused mask
+    if (entity == data) return false;
+    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
     return true;
 }
 
 public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
 {
+#pragma unused name, dontBroadcast
     int client = GetClientOfUserId(GetEventInt(event, "userid"));
     int newTeam = GetEventInt(event, "team");
     int oldTeam = GetEventInt(event, "oldteam");
     
-    if (!IsValidClient(client))
-        return;
+    if (!IsValidClient(client)) return;
         
-    // Player leaving survivors team (going spectator/afk)
     if (oldTeam == 2 && newTeam != 2)
     {
         SavePlayerRobotConfig(client);
-        CleanupAllRobots(client);
+        CleanupAllRobots(client, true);
     }
-    // Player joining survivors team
-    else if (newTeam == 2 && IsPlayerAlive(client))
+    else if (newTeam == 2 && oldTeam != 2 && IsPlayerAlive(client))
     {
-        CleanupAllRobots(client);  // Ensure thorough cleanup before restoring
-        LoadPlayerRobotConfig(client);
-    }
-}
-
-
-public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
-{
-    int client = GetClientOfUserId(GetEventInt(event, "userid"));
-    if (IsValidClient(client) && !IsFakeClient(client) && GetClientTeam(client) == 2)  // Only for survivors
-    {
+        CleanupAllRobots(client, true);
         LoadPlayerRobotConfig(client);
     }
 }
 
 public void OnMapEnd()
 {
-    // Clean up all clients
     for (int client = 1; client <= MaxClients; client++)
     {
         if (IsValidClient(client))
         {
             SavePlayerRobotConfig(client);
-            CleanupAllRobots(client);
+            CleanupAllRobots(client, true);
         }
     }
+	gamestart = false;
 }
 
 public Action Timer_RestoreRobots(Handle timer)
 {
+#pragma unused timer
     for (int i = 1; i <= MaxClients; i++)
     {
-        CleanupAllRobots(i);  // Thorough cleanup before restore
-        
-        // Restore robots for valid survivors
-        if (IsValidClient(i) && IsPlayerAlive(i) && GetClientTeam(i) == 2)
+        if (IsValidClient(i) && GetClientTeam(i) == 2 && IsPlayerAlive(i))
         {
             LoadPlayerRobotConfig(i);
         }
@@ -1369,39 +1195,38 @@ public Action Timer_RestoreRobots(Handle timer)
     return Plugin_Stop;
 }
 
-
-void CleanupAllRobots(int client)
+void CleanupAllRobots(int client, bool deleteEntities)
 {
-    // First pass: Release all robots
     for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++)
     {
         if (robots[client][i] != 0)
         {
-            Release(client, i);
+            ReleaseRobot(client, i, deleteEntities);
         }
     }
     
-    // Second pass: Force cleanup any remaining entities
-    char targetname[64];
-    int entity = -1;
-    while ((entity = FindEntityByClassname(entity, "prop_dynamic_override")) != -1)
-    {
-        if (IsValidEntity(entity))
+    if(deleteEntities) {
+        char targetname_check[64];
+        char robot_search_name[32];
+        Format(robot_search_name, sizeof(robot_search_name), "robot_%d_", client);
+
+        int entity = -1;
+        while ((entity = FindEntityByClassname(entity, "prop_dynamic_override")) != -1)
         {
-            // Check if this is a robot entity belonging to this client
-            Format(targetname, sizeof(targetname), "robot_%d_*", client);
-            if (HasEntProp(entity, Prop_Data, "m_iName"))
+            if (IsValidEntity(entity))
             {
-                GetEntPropString(entity, Prop_Data, "m_iName", targetname, sizeof(targetname));
-                if (StrContains(targetname, "robot_") != -1)
+                if (HasEntProp(entity, Prop_Data, "m_iName"))
                 {
-                    AcceptEntityInput(entity, "Kill");
+                    GetEntPropString(entity, Prop_Data, "m_iName", targetname_check, sizeof(targetname_check));
+                    if (StrContains(targetname_check, robot_search_name, false) == 0)
+                    {
+                        AcceptEntityInput(entity, "Kill");
+                    }
                 }
             }
         }
     }
     
-    // Reset all related arrays
     for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++)
     {
         robots[client][i] = 0;
@@ -1410,5 +1235,6 @@ void CleanupAllRobots(int client)
         firetime[client][i] = 0.0;
         reloading[client][i] = false;
         reloadtime[client][i] = 0.0;
+		g_robotTargets[client][i] = 0;
     }
 }
