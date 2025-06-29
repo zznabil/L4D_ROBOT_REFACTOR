@@ -740,7 +740,7 @@ void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float curr
     {
         if (GetEntProp(g_playerMainCIenemy[client], Prop_Data, "m_iHealth") > 0) {
             GetEntPropVector(g_playerMainCIenemy[client], Prop_Send, "m_vecOrigin", tempEnemyPos);
-            tempEnemyPos[2] += 20.0f;
+            tempEnemyPos[2] += 20.0;
             if (HasLineOfSight(currentRobotPos, tempEnemyPos))
             {
                 g_robotTargets[client][robotIndex] = g_playerMainCIenemy[client];
