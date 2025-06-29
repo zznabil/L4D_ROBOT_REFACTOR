@@ -8,7 +8,7 @@
 #define PLUGIN_NAME "[L4D2] Robot Guns"
 #define PLUGIN_AUTHOR "YourName (Enhanced by Jules)"
 #define PLUGIN_DESC "Use automatic robot guns to passively attack."
-#define PLUGIN_VERSION "1.1"
+#define PLUGIN_VERSION "1.2" // Incremented version for this fix
 #define PLUGIN_URL "https://yourwebsite.com"
 #define PLUGIN_NAME_SHORT "Robot Guns"
 #define PLUGIN_NAME_TECH "l4d2_robot"
@@ -618,12 +618,7 @@ void DoRobotLogic(int client, float currenttime, float duration)
 			}
 
 			if (robot_energy_cvar > -0.5) {
-				// botenergy is already accumulated per client in OnGameFrame if we move it there
-				// For now, if DoRobotLogic is called per client, this is fine here.
-				// If we want energy per robot, then botenergy would be robots[client][robotIdx].energy
-				// Let's assume botenergy[client] is total for all robots of a player for now.
-				// This part might need rethink if energy is per-robot.
-				// If it's shared energy pool, then this accumulation is fine.
+				// botenergy is already accumulated per client in OnGameFrame
 			}
 
 			int currentButtons = GetClientButtons(client);
@@ -828,13 +823,21 @@ public void OnGameFrame()
 	for (int client = 1; client <= MaxClients; client++)
 	{
 		if (!IsValidClient(client) || !IsPlayerAlive(client)) {
-			if (IsValidClient(client)) CleanupAllRobots(client, true); // Clean up if player is dead/invalid but was valid
+			if (IsValidClient(client)) CleanupAllRobots(client, true);
 			continue;
 		}
 
-		// Accumulate energy for player if system is enabled
-		if (robot_energy_cvar > -0.5) {
-		    botenergy[client] += duration;
+		if (robot_energy_cvar > -0.5) { // Check if energy system is enabled
+		    bool clientHasActiveRobots = false;
+		    for(int k=0; k < MAX_ROBOTS_PER_PLAYER; ++k) {
+		        if(RealValidEntity(robots[client][k])) {
+		            clientHasActiveRobots = true;
+		            break;
+		        }
+		    }
+		    if(clientHasActiveRobots) { // Only accumulate energy if player has active robots
+		        botenergy[client] += duration;
+		    }
 		}
 
 
@@ -1119,10 +1122,9 @@ public bool TraceRayDontHitSelfAndLiveFilterForLOS(int entity, int mask, any dat
 {
 #pragma unused data
 #pragma unused mask
-    if (IsValidClient(entity)) { // Simplified: if it hits any client (player/infected), it's blocked for this general LOS.
+    if (IsValidClient(entity)) {
         return false;
     }
-    // Could add checks for other specific entities to ignore for LOS if needed, e.g. other robots.
     return true;
 }
 
@@ -1218,9 +1220,24 @@ void CleanupAllRobots(int client, bool deleteEntities)
                 if (HasEntProp(entity, Prop_Data, "m_iName"))
                 {
                     GetEntPropString(entity, Prop_Data, "m_iName", targetname_check, sizeof(targetname_check));
+                    // Check if the entity's name starts with "robot_CLIENTID_"
                     if (StrContains(targetname_check, robot_search_name, false) == 0)
                     {
-                        AcceptEntityInput(entity, "Kill");
+                        // Further check to ensure it's not another player's robot if client ID part is short
+                        // e.g. robot_1_ vs robot_10_
+                        // This basic check is okay if targetnames are strictly robot_CLIENTID_ROBOTINDEX
+                        char full_robot_name_pattern[40];
+                        bool matches_a_robot_of_this_client = false;
+                        for(int r_idx=0; r_idx < MAX_ROBOTS_PER_PLAYER; ++r_idx) {
+                            Format(full_robot_name_pattern, sizeof(full_robot_name_pattern), "robot_%d_%d", client, r_idx);
+                            if(StrEqual(targetname_check, full_robot_name_pattern)) {
+                                matches_a_robot_of_this_client = true;
+                                break;
+                            }
+                        }
+                        if(matches_a_robot_of_this_client) {
+                             AcceptEntityInput(entity, "Kill");
+                        }
                     }
                 }
             }
@@ -1238,3 +1255,5 @@ void CleanupAllRobots(int client, bool deleteEntities)
 		g_robotTargets[client][i] = 0;
     }
 }
+
+[end of l4d_robot.sp]
