@@ -1128,20 +1128,6 @@ public bool TraceRayDontHitSelfAndLiveFilterForLOS(int entity, int mask, any dat
     return true;
 }
 
-bool TraceRayDontHitSelfAndLive(int entity, int mask, any data)
-{
-#pragma unused mask
-    if (data != -1 && entity == data) return false;
-    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
-    return true;
-}
-
-bool TraceEntityFilterPlayer(int entity, int contentsMask)
-{
-#pragma unused contentsMask
-    return (entity > MaxClients || !entity);
-}
-
 bool TraceRayIgnoreSelfAndSurvivors(int entity, int mask, any data)
 {
 #pragma unused mask
@@ -1256,4 +1242,4 @@ void CleanupAllRobots(int client, bool deleteEntities)
     }
 }
 
-[end of l4d_robot.sp]
+//[end of l4d_robot.sp]
