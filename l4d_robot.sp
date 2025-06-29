@@ -8,7 +8,7 @@
 #define PLUGIN_NAME "[L4D2] Robot Guns"
 #define PLUGIN_AUTHOR "YourName (Enhanced by Jules)"
 #define PLUGIN_DESC "Use automatic robot guns to passively attack."
-#define PLUGIN_VERSION "1.2" // Incremented version for this fix
+#define PLUGIN_VERSION "1.3"
 #define PLUGIN_URL "https://yourwebsite.com"
 #define PLUGIN_NAME_SHORT "Robot Guns"
 #define PLUGIN_NAME_TECH "l4d2_robot"
@@ -377,7 +377,6 @@ void ReleaseRobot(int controller, int robotIndex, bool delEntity = true)
         robots[controller][robotIndex] = 0;
         weapontypes[controller][robotIndex] = 0;
         g_robotTargets[controller][robotIndex] = 0;
-        // Reset other per-robot state arrays if they exist for this index
         firetime[controller][robotIndex] = 0.0;
         reloading[controller][robotIndex] = false;
         reloadtime[controller][robotIndex] = 0.0;
@@ -391,19 +390,17 @@ void ReleaseRobot(int controller, int robotIndex, bool delEntity = true)
         if (delEntity) DelRobotEntity(r);
     }
 
-    // Check if global gamestart should be set to false
-    // This check should be efficient; if any robot exists for any player, gamestart remains true.
     bool anyRobotStillExists = false;
     for (int client_idx = 1; client_idx <= MaxClients; client_idx++) {
-        if (IsValidClient(client_idx)) { // Only check valid clients
+        if (IsValidClient(client_idx)) {
             for (int robot_idx = 0; robot_idx < MAX_ROBOTS_PER_PLAYER; robot_idx++) {
                 if (RealValidEntity(robots[client_idx][robot_idx])) {
                     anyRobotStillExists = true;
-                    break; // Found one, no need to check further for this client
+                    break;
                 }
             }
         }
-        if (anyRobotStillExists) break; // Found one, no need to check further across all clients
+        if (anyRobotStillExists) break;
     }
     if (!anyRobotStillExists) gamestart = false;
 }
@@ -573,7 +570,7 @@ void AddRobot(int client, int robotIndex, bool showmsg = false)
 	
 	TeleportEntity(ent, spawnPos, playerAngles, NULL_VECTOR);
 	
-    SetEntProp(ent, Prop_Send, "m_CollisionGroup", 4); // COLLISION_GROUP_DEBRIS is 4
+    SetEntProp(ent, Prop_Send, "m_CollisionGroup", 4);
 	SetEntityMoveType(ent, MOVETYPE_NOCLIP);
 
 	SetVariantString("idle");
@@ -614,6 +611,15 @@ static float s_lastFrameTime = 0.0;
 
 void DoRobotLogic(int client, float currenttime, float duration)
 {
+	// Array to keep track of targets claimed by this client's robots in this frame
+    int frameClaimedTargets[MAX_ROBOTS_PER_PLAYER];
+    int numFrameClaimedTargets = 0;
+
+    // Reset actual g_robotTargets for this client's robots before re-evaluation
+    for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++) {
+        g_robotTargets[client][i] = 0;
+    }
+
 	float currentRobotPos[3];
 	float playerEyePosition[3]; GetClientEyePosition(client, playerEyePosition);
 	float playerViewAngles[3]; GetClientEyeAngles(client, playerViewAngles);
@@ -648,7 +654,7 @@ void DoRobotLogic(int client, float currenttime, float duration)
 
             bool targetAcquired = false;
             float enemyAimingPosition[3];
-            Robot_UpdateAimingAndTargeting(client, robotIdx, currentRobotPos, targetAcquired, enemyAimingPosition);
+            Robot_UpdateAimingAndTargeting(client, robotIdx, currentRobotPos, targetAcquired, enemyAimingPosition, frameClaimedTargets, numFrameClaimedTargets);
 
             Robot_HandleCombat(client, robotIdx, currenttime, targetAcquired, enemyAimingPosition, currentRobotPos);
 
@@ -697,7 +703,7 @@ void Robot_UpdateMovement(int client, int robotIndex, float duration, const floa
     targetRobotPos[client][robotIndex][0] = playerEyePos[0] + pForward[0]*localFormationOffset[0] + pRight[0]*localFormationOffset[1] + pUp[0]*localFormationOffset[2];
     targetRobotPos[client][robotIndex][1] = playerEyePos[1] + pForward[1]*localFormationOffset[0] + pRight[1]*localFormationOffset[1] + pUp[1]*localFormationOffset[2];
     targetRobotPos[client][robotIndex][2] = playerEyePos[2] + pForward[2]*localFormationOffset[0] + pRight[2]*localFormationOffset[1] + pUp[2]*localFormationOffset[2];
-    
+
     float distToPlayerActual = GetVectorDistance(currentRobotPos, playerEyePos);
 
     if (distToPlayerActual > ROBOT_SNAP_DISTANCE)
@@ -719,43 +725,106 @@ void Robot_UpdateMovement(int client, int robotIndex, float duration, const floa
     }
 }
 
-void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float currentRobotPos[3], bool &targetAcquired, float enemyAimPos[3])
+// Helper function for Robot Targeting and Aiming
+// enemyAimPos is an out parameter
+// frameClaimedTargets and numFrameClaimedTargets are used for unique target selection within a player's robots for this frame
+void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float currentRobotPos[3], bool &targetAcquired, float enemyAimPos[3], int frameClaimedTargets[MAX_ROBOTS_PER_PLAYER], int &numFrameClaimedTargets)
 {
     targetAcquired = false;
-    g_robotTargets[client][robotIndex] = 0;
+    // g_robotTargets[client][robotIndex] is set here if a target is found.
+    // It's reset at the start of DoRobotLogic's loop for the client's robots.
 
     float tempEnemyPos[3];
     float tempInfectedEyePos[3], tempInfectedOrigin[3];
+    int potentialTarget = 0;
 
-    if (IsValidClient(g_playerMainSIenemy[client]) && IsPlayerAlive(g_playerMainSIenemy[client]))
+    // Priority 1: Special Infected
+    potentialTarget = g_playerMainSIenemy[client];
+    if (IsValidClient(potentialTarget) && IsPlayerAlive(potentialTarget))
     {
-        GetClientEyePosition(g_playerMainSIenemy[client], tempInfectedEyePos);
-        GetClientAbsOrigin(g_playerMainSIenemy[client], tempInfectedOrigin);
-        tempEnemyPos[0] = tempInfectedOrigin[0] * 0.4 + tempInfectedEyePos[0] * 0.6;
-        tempEnemyPos[1] = tempInfectedOrigin[1] * 0.4 + tempInfectedEyePos[1] * 0.6;
-        tempEnemyPos[2] = tempInfectedOrigin[2] * 0.4 + tempInfectedEyePos[2] * 0.6;
-
-        if (HasLineOfSight(currentRobotPos, tempEnemyPos))
-        {
-            g_robotTargets[client][robotIndex] = g_playerMainSIenemy[client];
-            targetAcquired = true;
-            for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
+        bool alreadyClaimedBySibling = false;
+        for (int k = 0; k < numFrameClaimedTargets; k++) {
+            if (frameClaimedTargets[k] == potentialTarget) {
+                alreadyClaimedBySibling = true;
+                break;
+            }
         }
-    }
-    
-    if (!targetAcquired && RealValidEntity(g_playerMainCIenemy[client]))
-    {
-        if (GetEntProp(g_playerMainCIenemy[client], Prop_Data, "m_iHealth") > 0) {
-            GetEntPropVector(g_playerMainCIenemy[client], Prop_Send, "m_vecOrigin", tempEnemyPos);
-            tempEnemyPos[2] += 20.0;
+
+        if (!alreadyClaimedBySibling) {
+            GetClientEyePosition(potentialTarget, tempInfectedEyePos);
+            GetClientAbsOrigin(potentialTarget, tempInfectedOrigin);
+            tempEnemyPos[0] = tempInfectedOrigin[0] * 0.4 + tempInfectedEyePos[0] * 0.6;
+            tempEnemyPos[1] = tempInfectedOrigin[1] * 0.4 + tempInfectedEyePos[1] * 0.6;
+            tempEnemyPos[2] = tempInfectedOrigin[2] * 0.4 + tempInfectedEyePos[2] * 0.6;
+
             if (HasLineOfSight(currentRobotPos, tempEnemyPos))
             {
-                g_robotTargets[client][robotIndex] = g_playerMainCIenemy[client];
+                g_robotTargets[client][robotIndex] = potentialTarget;
+                targetAcquired = true;
+                for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
+                if (numFrameClaimedTargets < MAX_ROBOTS_PER_PLAYER) {
+                    frameClaimedTargets[numFrameClaimedTargets++] = potentialTarget;
+                }
+            }
+        }
+    }
+
+    // Priority 2: Common Infected
+    if (!targetAcquired) {
+        potentialTarget = g_playerMainCIenemy[client];
+        if (RealValidEntity(potentialTarget) && GetEntProp(potentialTarget, Prop_Data, "m_iHealth") > 0) {
+            bool alreadyClaimedBySibling = false;
+            for (int k = 0; k < numFrameClaimedTargets; k++) {
+                if (frameClaimedTargets[k] == potentialTarget) {
+                    alreadyClaimedBySibling = true;
+                    break;
+                }
+            }
+
+            if (!alreadyClaimedBySibling) {
+                GetEntPropVector(potentialTarget, Prop_Send, "m_vecOrigin", tempEnemyPos);
+                tempEnemyPos[2] += 20.0;
+                if (HasLineOfSight(currentRobotPos, tempEnemyPos))
+                {
+                    g_robotTargets[client][robotIndex] = potentialTarget;
+                    targetAcquired = true;
+                    for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
+                     if (numFrameClaimedTargets < MAX_ROBOTS_PER_PLAYER) {
+                        frameClaimedTargets[numFrameClaimedTargets++] = potentialTarget;
+                    }
+                }
+            }
+        } else if (RealValidEntity(potentialTarget)) {
+             g_playerMainCIenemy[client] = 0;
+        }
+    }
+
+    // Fallback: If this robot still has no unique target, allow targeting an already claimed (by sibling) high-priority target.
+    if (!targetAcquired) {
+        potentialTarget = g_playerMainSIenemy[client];
+        if (IsValidClient(potentialTarget) && IsPlayerAlive(potentialTarget)) {
+            GetClientEyePosition(potentialTarget, tempInfectedEyePos);
+            GetClientAbsOrigin(potentialTarget, tempInfectedOrigin);
+            tempEnemyPos[0] = tempInfectedOrigin[0] * 0.4 + tempInfectedEyePos[0] * 0.6;
+            tempEnemyPos[1] = tempInfectedOrigin[1] * 0.4 + tempInfectedEyePos[1] * 0.6;
+            tempEnemyPos[2] = tempInfectedOrigin[2] * 0.4 + tempInfectedEyePos[2] * 0.6;
+            if (HasLineOfSight(currentRobotPos, tempEnemyPos)) {
+                g_robotTargets[client][robotIndex] = potentialTarget;
                 targetAcquired = true;
                 for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
             }
-        } else {
-            g_playerMainCIenemy[client] = 0;
+        }
+        if (!targetAcquired) {
+            potentialTarget = g_playerMainCIenemy[client];
+            if (RealValidEntity(potentialTarget) && GetEntProp(potentialTarget, Prop_Data, "m_iHealth") > 0) {
+                 GetEntPropVector(potentialTarget, Prop_Send, "m_vecOrigin", tempEnemyPos);
+                 tempEnemyPos[2] += 20.0;
+                 if (HasLineOfSight(currentRobotPos, tempEnemyPos)) {
+                    g_robotTargets[client][robotIndex] = potentialTarget;
+                    targetAcquired = true;
+                    for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
+                 }
+            }
         }
     }
 
@@ -834,14 +903,14 @@ public void OnGameFrame()
 
 	for (int client = 1; client <= MaxClients; client++)
 	{
-		if (!IsValidClient(client)) continue; // Skip invalid clients early
+		if (!IsValidClient(client)) continue;
 
 		if (!IsPlayerAlive(client)) {
-			CleanupAllRobots(client, true); // Clean up if player is dead
-			continue; // Move to next client
+			CleanupAllRobots(client, true);
+			continue;
 		}
 
-		if (robot_energy_cvar > -0.5) { // Check if energy system is enabled
+		if (robot_energy_cvar > -0.5) {
 		    bool clientHasActiveRobots = false;
 		    for(int k=0; k < MAX_ROBOTS_PER_PLAYER; ++k) {
 		        if(RealValidEntity(robots[client][k])) {
@@ -849,12 +918,11 @@ public void OnGameFrame()
 		            break;
 		        }
 		    }
-		    if(clientHasActiveRobots) { // Only accumulate energy if player has active robots
+		    if(clientHasActiveRobots) {
 		        botenergy[client] += duration;
 		    }
 		}
 
-		// Use ternary for MaxFloat: (condition ? value_if_true : value_if_false)
 		if (currenttime - scantime[client] > (0.1 > robot_reactiontime_cvar ? 0.1 : robot_reactiontime_cvar))
 		{
 			scantime[client] = currenttime;
@@ -867,7 +935,7 @@ public void OnGameFrame()
 
 	for (int client = 1; client <= MaxClients; client++)
 	{
-		if (IsValidClient(client)) {
+		if (IsValidClient(client) && IsPlayerAlive(client)) { // Ensure player is alive for DoRobotLogic
 			DoRobotLogic(client, currenttime, duration);
 		}
 	}
@@ -940,9 +1008,9 @@ int ScanEnemy(int client, float rpos[3], int ignoredEntityForLOS)
     return find;
 }
 
-bool TraceRayDontHitSelfAndLive(int entity, int mask, any data)
+bool TraceRayDontHitSelfAndLive(int entity, int contentsMask, any data)
 {
-#pragma unused mask
+#pragma unused contentsMask
     if (data != -1 && entity == data) return false;
 
     if (IsValidClient(entity))
@@ -1027,11 +1095,10 @@ void LoadPlayerRobotConfig(int client)
 			break;
 		}
     }
-	g_bHasSavedConfig[client] = false; // Mark config as used/loaded
+	g_bHasSavedConfig[client] = false;
 }
 
-// FireBullet: enemyTargetPos and botOrigin are read-only.
-void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], const float botOrigin[3]) // botOrigin made const
+void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], const float botOrigin[3])
 {
     if (!IsValidClient(client) || !RealValidEntity(robots[client][robotIndex])) return;
         
@@ -1138,16 +1205,14 @@ bool HasLineOfSight(const float start[3], const float end[3])
 public bool TraceRayDontHitSelfAndLiveFilterForLOS(int entity, int contentsMask, any data)
 {
 #pragma unused data
-#pragma unused contentsMask // Changed mask to contentsMask to match common signature, though it's unused.
-    // Block LOS if it hits any player (survivor or infected) or common infected.
-    // This is a general purpose LOS, so anything that's not world geometry could be considered a blocker.
+#pragma unused contentsMask
     if (IsValidClient(entity)) {
         return false;
     }
     if (RealValidEntity(entity)) {
         char classname[32];
         GetEntityClassname(entity, classname, sizeof(classname));
-        if (StrEqual(classname, "infected")) { // Common infected
+        if (StrEqual(classname, "infected")) {
             return false;
         }
     }
@@ -1158,12 +1223,10 @@ public bool TraceRayDontHitSelfAndLiveFilterForLOS(int entity, int contentsMask,
 bool TraceRayDontHitSelfAndLive(int entity, int contentsMask, any data)
 {
 #pragma unused contentsMask
-    if (data != -1 && entity == data) return false; // Don't hit the entity we are told to ignore (e.g. the scanning robot)
+    if (data != -1 && entity == data) return false;
 
-    // Don't let scan lines be blocked by other survivors.
     if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
 
-    // Allow hitting infected players (team 3) and common infected.
     return true;
 }
 
@@ -1178,11 +1241,8 @@ bool TraceEntityFilterPlayer(int entity, int contentsMask)
 bool TraceRayIgnoreSelfAndSurvivors(int entity, int contentsMask, any data)
 {
 #pragma unused contentsMask
-    if (entity == data) return false; // Don't hit self (the firing robot)
-
-    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false; // Don't hit survivors
-
-    // Allow hitting other entities including other robots or infected.
+    if (entity == data) return false;
+    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
     return true;
 }
 
@@ -1256,12 +1316,8 @@ void CleanupAllRobots(int client, bool deleteEntities)
                 if (HasEntProp(entity, Prop_Data, "m_iName"))
                 {
                     GetEntPropString(entity, Prop_Data, "m_iName", targetname_check, sizeof(targetname_check));
-                    // Check if the entity's name starts with "robot_CLIENTID_"
                     if (StrContains(targetname_check, robot_search_name, false) == 0)
                     {
-                        // Further check to ensure it's not another player's robot if client ID part is short
-                        // e.g. robot_1_ vs robot_10_
-                        // This basic check is okay if targetnames are strictly robot_CLIENTID_ROBOTINDEX
                         char full_robot_name_pattern[40];
                         bool matches_a_robot_of_this_client = false;
                         for(int r_idx=0; r_idx < MAX_ROBOTS_PER_PLAYER; ++r_idx) {
