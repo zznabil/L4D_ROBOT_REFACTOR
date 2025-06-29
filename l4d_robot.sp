@@ -377,23 +377,35 @@ void ReleaseRobot(int controller, int robotIndex, bool delEntity = true)
         robots[controller][robotIndex] = 0;
         weapontypes[controller][robotIndex] = 0;
         g_robotTargets[controller][robotIndex] = 0;
+        // Reset other per-robot state arrays if they exist for this index
+        firetime[controller][robotIndex] = 0.0;
+        reloading[controller][robotIndex] = false;
+        reloadtime[controller][robotIndex] = 0.0;
+        for(int k=0; k<3; k++) {
+            lastRobotPos[controller][robotIndex][k] = 0.0;
+            targetRobotPos[controller][robotIndex][k] = 0.0;
+            g_robotCurrentAngles[controller][robotIndex][k] = 0.0;
+            robotTargetAngles[controller][robotIndex][k] = 0.0;
+        }
         
         if (delEntity) DelRobotEntity(r);
     }
 
-    bool anyRobotExists = false;
-    for (int i = 1; i <= MaxClients; i++) {
-        if (IsValidClient(i)) {
-            for (int j = 0; j < MAX_ROBOTS_PER_PLAYER; j++) {
-                if (RealValidEntity(robots[i][j])) {
-                    anyRobotExists = true;
-                    break;
+    // Check if global gamestart should be set to false
+    // This check should be efficient; if any robot exists for any player, gamestart remains true.
+    bool anyRobotStillExists = false;
+    for (int client_idx = 1; client_idx <= MaxClients; client_idx++) {
+        if (IsValidClient(client_idx)) { // Only check valid clients
+            for (int robot_idx = 0; robot_idx < MAX_ROBOTS_PER_PLAYER; robot_idx++) {
+                if (RealValidEntity(robots[client_idx][robot_idx])) {
+                    anyRobotStillExists = true;
+                    break; // Found one, no need to check further for this client
                 }
             }
         }
-        if (anyRobotExists) break;
+        if (anyRobotStillExists) break; // Found one, no need to check further across all clients
     }
-    if (!anyRobotExists) gamestart = false;
+    if (!anyRobotStillExists) gamestart = false;
 }
 
 public Action Cmd_AddRobot(int client, int args)
@@ -561,7 +573,7 @@ void AddRobot(int client, int robotIndex, bool showmsg = false)
 	
 	TeleportEntity(ent, spawnPos, playerAngles, NULL_VECTOR);
 	
-	SetEntProp(ent, Prop_Send, "m_CollisionGroup", COLLISION_GROUP_DEBRIS);
+    SetEntProp(ent, Prop_Send, "m_CollisionGroup", 4); // COLLISION_GROUP_DEBRIS is 4
 	SetEntityMoveType(ent, MOVETYPE_NOCLIP);
 
 	SetVariantString("idle");
@@ -822,9 +834,11 @@ public void OnGameFrame()
 
 	for (int client = 1; client <= MaxClients; client++)
 	{
-		if (!IsValidClient(client) || !IsPlayerAlive(client)) {
-			if (IsValidClient(client)) CleanupAllRobots(client, true);
-			continue;
+		if (!IsValidClient(client)) continue; // Skip invalid clients early
+
+		if (!IsPlayerAlive(client)) {
+			CleanupAllRobots(client, true); // Clean up if player is dead
+			continue; // Move to next client
 		}
 
 		if (robot_energy_cvar > -0.5) { // Check if energy system is enabled
@@ -840,8 +854,8 @@ public void OnGameFrame()
 		    }
 		}
 
-
-		if (currenttime - scantime[client] > MaxFloat(0.1, robot_reactiontime_cvar))
+		// Use ternary for MaxFloat: (condition ? value_if_true : value_if_false)
+		if (currenttime - scantime[client] > (0.1 > robot_reactiontime_cvar ? 0.1 : robot_reactiontime_cvar))
 		{
 			scantime[client] = currenttime;
 			float playerEyePos[3];
@@ -1128,6 +1142,20 @@ public bool TraceRayDontHitSelfAndLiveFilterForLOS(int entity, int mask, any dat
     return true;
 }
 
+bool TraceRayDontHitSelfAndLive(int entity, int mask, any data)
+{
+#pragma unused mask
+    if (data != -1 && entity == data) return false;
+    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
+    return true;
+}
+
+bool TraceEntityFilterPlayer(int entity, int contentsMask)
+{
+#pragma unused contentsMask
+    return (entity > MaxClients || !entity);
+}
+
 bool TraceRayIgnoreSelfAndSurvivors(int entity, int mask, any data)
 {
 #pragma unused mask
@@ -1242,4 +1270,4 @@ void CleanupAllRobots(int client, bool deleteEntities)
     }
 }
 
-//[end of l4d_robot.sp]
+[end of l4d_robot.sp]
