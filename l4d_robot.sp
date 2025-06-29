@@ -1113,7 +1113,7 @@ void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], float
             }
         }
     }
-    EmitSoundToAll(SOUND[weapontypes[client][robotIndex]], robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_NORMAL, 0, SNDVOL_NORMAL, SNDPITCH_NORMAL, robots[client][robotIndex]);
+    EmitSoundToAll(SOUND[weapontypes[client][robotIndex]], robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_NORMAL, 0, SNDVOL_NORMAL, SNDPITCH_NORMAL, _, _, true); // Added missing parameters for EmitSoundToAll
 }
 
 float LerpAngle(float current, float target, float speed)
@@ -1124,7 +1124,8 @@ float LerpAngle(float current, float target, float speed)
     return current + diff * speed;
 }
 
-bool HasLineOfSight(float start[3], float end[3])
+// Corrected: start and end should be const as they are not modified.
+bool HasLineOfSight(const float start[3], const float end[3])
 {
     Handle trace = TR_TraceRayFilterEx(start, end, MASK_VISIBLE_AND_NPCS, RayType_EndPoint, TraceRayDontHitSelfAndLiveFilterForLOS, -1);
     bool didHit = TR_DidHit(trace);
@@ -1132,23 +1133,39 @@ bool HasLineOfSight(float start[3], float end[3])
     return !didHit;
 }
 
-public bool TraceRayDontHitSelfAndLiveFilterForLOS(int entity, int mask, any data)
+// This filter is for general LOS checks from a point to another, data is usually -1
+public bool TraceRayDontHitSelfAndLiveFilterForLOS(int entity, int contentsMask, any data)
 {
 #pragma unused data
-#pragma unused mask
+#pragma unused contentsMask // Changed mask to contentsMask to match common signature, though it's unused.
+    // Block LOS if it hits any player (survivor or infected) or common infected.
+    // This is a general purpose LOS, so anything that's not world geometry could be considered a blocker.
     if (IsValidClient(entity)) {
         return false;
+    }
+    if (RealValidEntity(entity)) {
+        char classname[32];
+        GetEntityClassname(entity, classname, sizeof(classname));
+        if (StrEqual(classname, "infected")) { // Common infected
+            return false;
+        }
     }
     return true;
 }
 
-bool TraceRayDontHitSelfAndLive(int entity, int mask, any data)
+// This filter is used by ScanCommon/ScanEnemy. 'data' is ignoredEntityForLOS (the scanning robot or -1).
+bool TraceRayDontHitSelfAndLive(int entity, int contentsMask, any data)
 {
-#pragma unused mask
-    if (data != -1 && entity == data) return false;
+#pragma unused contentsMask
+    if (data != -1 && entity == data) return false; // Don't hit the entity we are told to ignore (e.g. the scanning robot)
+
+    // Don't let scan lines be blocked by other survivors.
     if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
+
+    // Allow hitting infected players (team 3) and common infected.
     return true;
 }
+
 
 bool TraceEntityFilterPlayer(int entity, int contentsMask)
 {
@@ -1156,11 +1173,15 @@ bool TraceEntityFilterPlayer(int entity, int contentsMask)
     return (entity > MaxClients || !entity);
 }
 
-bool TraceRayIgnoreSelfAndSurvivors(int entity, int mask, any data)
+// Filter for FireBullet: 'data' is the firing robot's entity index.
+bool TraceRayIgnoreSelfAndSurvivors(int entity, int contentsMask, any data)
 {
-#pragma unused mask
-    if (entity == data) return false;
-    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
+#pragma unused contentsMask
+    if (entity == data) return false; // Don't hit self (the firing robot)
+
+    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false; // Don't hit survivors
+
+    // Allow hitting other entities including other robots or infected.
     return true;
 }
 
