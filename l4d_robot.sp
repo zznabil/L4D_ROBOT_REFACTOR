@@ -121,7 +121,7 @@ ConVar l4d_robot_messages;
 ConVar l4d_robot_glow; 
 
 #define BITFLAG_MESSAGE_INFO (1 << 0)
-#define BITFLAG_MESSAGE_STEAL (1 << 1) // This flag seems unused in original logic
+#define BITFLAG_MESSAGE_STEAL (1 << 1)
 
 static float robot_reactiontime_cvar;
 static float robot_scanrange_cvar;
@@ -935,7 +935,7 @@ public void OnGameFrame()
 
 	for (int client = 1; client <= MaxClients; client++)
 	{
-		if (IsValidClient(client) && IsPlayerAlive(client)) { // Ensure player is alive for DoRobotLogic
+		if (IsValidClient(client) && IsPlayerAlive(client)) {
 			DoRobotLogic(client, currenttime, duration);
 		}
 	}
