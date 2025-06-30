@@ -631,7 +631,15 @@ void DoRobotLogic(int client, float currenttime, float duration)
 
 			if (robot_energy_cvar > -0.5 && botenergy[client] > robot_energy_cvar) {
 				ReleaseRobot(client, robotIdx, true);
-				if(numFrameClaimedTargets == 0 && playerRobotCount(client) == 1) PrintHintText(client, "\x07[RobotGuns]\x01 Your robot energy is depleted.");
+				// Check if this was the last robot for the client before printing energy depleted message
+				bool wasLastRobot = true;
+				for (int k=0; k < MAX_ROBOTS_PER_PLAYER; ++k) {
+					if (k != robotIdx && RealValidEntity(robots[client][k])) {
+						wasLastRobot = false;
+						break;
+					}
+				}
+				if(wasLastRobot) PrintHintText(client, "\x07[RobotGuns]\x01 Your robot energy is depleted.");
 				continue;
 			}
 
