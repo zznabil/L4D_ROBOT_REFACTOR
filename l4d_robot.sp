@@ -8,8 +8,8 @@
 #define PLUGIN_NAME "[L4D2] Robot Guns"
 #define PLUGIN_AUTHOR "Original by Pan Xiaohai, Shadowysn; Enhancements by Jules"
 #define PLUGIN_DESC "Use automatic robot guns to passively attack."
-#define PLUGIN_VERSION "1.4" // Incremented version for fixes
-#define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=130177" // Original URL
+#define PLUGIN_VERSION "1.4.1" // Incremented version for latest fixes
+#define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=130177"
 #define PLUGIN_NAME_SHORT "Robot Guns"
 #define PLUGIN_NAME_TECH "l4d2_robot"
 
@@ -134,6 +134,7 @@ static bool L4D2Version = false;
 static int GameMode=0;
 
 static bool gamestart = false;
+static float s_lastFrameTime = 0.0;
 
 static bool g_bHasSavedConfig[MAXPLAYERS+1];
 static int g_iSavedWeaponTypes[MAXPLAYERS+1][MAX_ROBOTS_PER_PLAYER];
@@ -141,6 +142,7 @@ static int g_iSavedRobotCount[MAXPLAYERS+1];
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
+#pragma unused myself, late
 	if (GetEngineVersion() == Engine_Left4Dead2) L4D2Version = true;
 	else if (GetEngineVersion() != Engine_Left4Dead) {
 		strcopy(error, err_max, "Plugin only supports Left 4 Dead 1 & 2.");
@@ -264,15 +266,15 @@ public void OnMapStart()
 		g_sprite = PrecacheModel("materials/sprites/laser.vmt", true);
 	}
 	gamestart = false;
-	s_lastFrameTime = GetEngineTime(); // Initialize frame time
+	s_lastFrameTime = GetEngineTime();
 }
 
 public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
 #pragma unused event, name, dontBroadcast
     CreateTimer(0.5, Timer_DelayedRoundStartActions, _, TIMER_FLAG_NO_MAPCHANGE);
-    gamestart = true; // Set gamestart to true here
-	s_lastFrameTime = GetEngineTime(); // Reset frame time
+    gamestart = true;
+	s_lastFrameTime = GetEngineTime();
 }
 
 public Action Timer_DelayedRoundStartActions(Handle timer)
@@ -305,7 +307,7 @@ public void Event_RoundEnd(Event event, const char[] name, bool dontBroadcast)
         if (IsValidClient(client))
         {
             SavePlayerRobotConfig(client);
-			CleanupAllRobots(client, true); // Also cleanup robots on round end
+			CleanupAllRobots(client, true);
         }
     }
 	gamestart = false;
@@ -354,8 +356,6 @@ void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 	}
 	else
 	{
-		// If attacked by common infected (attacker is not a client), also force a rescan.
-		// This helps react to commons that might not have been in the last periodic scan.
 		scantime[victim] = 0.0;
 	}
 }
@@ -604,8 +604,6 @@ void AddRobot(int client, int robotIndex, bool showmsg = false)
 	gamestart = true;
 }
 
-static float s_lastFrameTime = 0.0;
-
 void DoRobotLogic(int client, float currenttime, float duration)
 {
     int frameClaimedTargets[MAX_ROBOTS_PER_PLAYER];
@@ -616,8 +614,8 @@ void DoRobotLogic(int client, float currenttime, float duration)
     }
 
 	float currentRobotPos[3];
-	float playerOrigin[3]; GetClientAbsOrigin(client, playerOrigin); // For X,Y base
-	float playerEyePosition[3]; GetClientEyePosition(client, playerEyePosition); // For Z base and view angles
+	float playerOrigin[3]; GetClientAbsOrigin(client, playerOrigin);
+	float playerEyePosition[3]; GetClientEyePosition(client, playerEyePosition);
 	float playerViewAngles[3]; GetClientEyeAngles(client, playerViewAngles);
 	float pForward[3], pRight[3], pUp[3]; GetAngleVectors(playerViewAngles, pForward, pRight, pUp);
 
@@ -633,7 +631,7 @@ void DoRobotLogic(int client, float currenttime, float duration)
 
 			if (robot_energy_cvar > -0.5 && botenergy[client] > robot_energy_cvar) {
 				ReleaseRobot(client, robotIdx, true);
-				if(numFrameClaimedTargets == 0) PrintHintText(client, "\x07[RobotGuns]\x01 Your robot energy is depleted."); // Show once
+				if(numFrameClaimedTargets == 0 && playerRobotCount(client) == 1) PrintHintText(client, "\x07[RobotGuns]\x01 Your robot energy is depleted.");
 				continue;
 			}
 
@@ -657,7 +655,6 @@ void DoRobotLogic(int client, float currenttime, float duration)
             Robot_HandleCombat(client, robotIdx, currenttime, targetAcquired, enemyAimingPosition, currentRobotPos);
 
             float finalTeleportPos[3];
-			// Pass playerOrigin for X/Y base, playerEyePosition for Z base to Robot_UpdateMovement
             Robot_UpdateMovement(client, robotIdx, duration, currentRobotPos, playerOrigin, playerEyePosition[2], pForward, pRight, pUp, finalTeleportPos);
 
 			TeleportEntity(robots[client][robotIdx], finalTeleportPos, g_robotCurrentAngles[client][robotIdx], NULL_VECTOR);
@@ -702,11 +699,11 @@ void Robot_UpdateMovement(int client, int robotIndex, float duration, const floa
 	float baseFormationPos[3];
 	baseFormationPos[0] = playerOrigin[0];
 	baseFormationPos[1] = playerOrigin[1];
-	baseFormationPos[2] = playerEyePosZ; // Use player's eye Z as base height
+	baseFormationPos[2] = playerEyePosZ;
 
     targetRobotPos[client][robotIndex][0] = baseFormationPos[0] + pForward[0]*localFormationOffset[0] + pRight[0]*localFormationOffset[1] + pUp[0]*localFormationOffset[2];
     targetRobotPos[client][robotIndex][1] = baseFormationPos[1] + pForward[1]*localFormationOffset[0] + pRight[1]*localFormationOffset[1] + pUp[1]*localFormationOffset[2];
-    targetRobotPos[client][robotIndex][2] = baseFormationPos[2] + pForward[2]*localFormationOffset[0] + pRight[2]*localFormationOffset[1] + pUp[2]*localFormationOffset[2]; // Apply Z offset from formation to the eye height base
+    targetRobotPos[client][robotIndex][2] = baseFormationPos[2] + pForward[2]*localFormationOffset[0] + pRight[2]*localFormationOffset[1] + pUp[2]*localFormationOffset[2];
 
     float distToPlayerActual = GetVectorDistance(currentRobotPos, playerOrigin);
 
@@ -1202,18 +1199,12 @@ bool HasLineOfSight(const float start[3], const float end[3], int targetEntity)
 public bool RobotLOSFilter(int entityHit, int contentsMask, any data)
 {
 #pragma unused contentsMask
-    int targetEntity = view_as<int>(data); // Cast data to int
-    if (entityHit == targetEntity && targetEntity != -1) return false; // Don't block LOS if we hit the intended target.
+    int targetEntity = view_as<int>(data);
+    if (entityHit == targetEntity && targetEntity != -1) return false;
 
-    // Block LOS if we hit a survivor (assuming robots shouldn't shoot through them to reach a target).
     if (IsValidClient(entityHit) && GetClientTeam(entityHit) == 2) return true;
 
-    // MASK_VISIBLE_AND_NPCS in TR_TraceRayFilterEx handles most world geometry.
-    // This filter is mostly to make exceptions or specific additional blocks.
-    // If it's not the target and not a survivor, and it's solid, it blocks.
-    // If TR_DidHit is true, it means something solid was hit. If that solid thing
-    // wasn't the target or a survivor we want to ignore, then LOS is blocked.
-    return true; // Default to blocking if it's not the target and not explicitly allowed to pass through.
+    return true;
 }
 
 // This filter is used by ScanCommon/ScanEnemy. 'data' is ignoredEntityForLOS (the scanning robot or -1).
