@@ -8,7 +8,7 @@
 #define PLUGIN_NAME "[L4D2] Robot Guns"
 #define PLUGIN_AUTHOR "Original by Pan Xiaohai, Shadowysn; Enhancements by Jules"
 #define PLUGIN_DESC "Use automatic robot guns to passively attack."
-#define PLUGIN_VERSION "1.4.1" // Incremented version for latest fixes
+#define PLUGIN_VERSION "1.4.2" // Incremented version for LOS and targeting fixes
 #define PLUGIN_URL "https://forums.alliedmods.net/showthread.php?t=130177"
 #define PLUGIN_NAME_SHORT "Robot Guns"
 #define PLUGIN_NAME_TECH "l4d2_robot"
@@ -351,11 +351,12 @@ void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 	{	
 		if (attacker != victim && GetClientTeam(attacker) == 3)
 		{
-			scantime[victim] = 0.0;
+			scantime[victim] = 0.0; // Force rescan for this player if they were hurt by SI
 		}
 	}
 	else
 	{
+		// Potentially hurt by common infected or world, also good to rescan
 		scantime[victim] = 0.0;
 	}
 }
@@ -606,12 +607,11 @@ void AddRobot(int client, int robotIndex, bool showmsg = false)
 
 void DoRobotLogic(int client, float currenttime, float duration)
 {
-    int frameClaimedTargets[MAX_ROBOTS_PER_PLAYER];
+    int frameClaimedTargets[MAX_ROBOTS_PER_PLAYER]; // Stores entity IDs of targets claimed this frame by this client's robots
     int numFrameClaimedTargets = 0;
 
-    for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++) {
-        g_robotTargets[client][i] = 0;
-    }
+    // Reset per-robot targets for this frame (will be re-evaluated)
+    // g_robotTargets[client][i] = 0; // This was done before, but might be better inside the loop or as part of Robot_UpdateAimingAndTargeting init
 
 	float currentRobotPos[3];
 	float playerOrigin[3]; GetClientAbsOrigin(client, playerOrigin);
@@ -631,7 +631,6 @@ void DoRobotLogic(int client, float currenttime, float duration)
 
 			if (robot_energy_cvar > -0.5 && botenergy[client] > robot_energy_cvar) {
 				ReleaseRobot(client, robotIdx, true);
-				// Check if this was the last robot for the client before printing energy depleted message
 				bool wasLastRobot = true;
 				for (int k=0; k < MAX_ROBOTS_PER_PLAYER; ++k) {
 					if (k != robotIdx && RealValidEntity(robots[client][k])) {
@@ -685,15 +684,17 @@ void DoRobotLogic(int client, float currenttime, float duration)
 void CalculateRobotFormationOffset(int client, int robotIndex, float outOffset[3])
 {
 #pragma unused client
+    // Increased Z-axis values for higher positioning
     float formationOffsets[MAX_ROBOTS_PER_PLAYER][3] = {
-        { 40.0,   0.0,  15.0},  // Robot 0: Front-Center slightly up
-        { 20.0,  60.0,  10.0},  // Robot 1: Right-Shoulder-Up
-        { 20.0, -60.0,  10.0},  // Robot 2: Left-Shoulder-Up
-        {-50.0,   0.0,  20.0}   // Robot 3: Behind-Overhead
+        { 40.0,   0.0,  35.0},  // Robot 0: Front-Center higher up
+        { 20.0,  60.0,  30.0},  // Robot 1: Right-Shoulder higher Up
+        { 20.0, -60.0,  30.0},  // Robot 2: Left-Shoulder higher Up
+        {-50.0,   0.0,  40.0}   // Robot 3: Behind-Overhead higher
     };
 
     if (robotIndex < 0 || robotIndex >= MAX_ROBOTS_PER_PLAYER) {
-        outOffset[0] = 50.0; outOffset[1] = 0.0; outOffset[2] = 15.0;
+        // Default fallback if index is out of bounds
+        outOffset[0] = 50.0; outOffset[1] = 0.0; outOffset[2] = 35.0;
         return;
     }
     for(int i=0; i<3; i++) outOffset[i] = formationOffsets[robotIndex][i];
@@ -737,11 +738,13 @@ void Robot_UpdateMovement(int client, int robotIndex, float duration, const floa
 void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float currentRobotPos[3], bool &targetAcquired, float enemyAimPos[3], int frameClaimedTargets[MAX_ROBOTS_PER_PLAYER], int &numFrameClaimedTargets)
 {
     targetAcquired = false;
+    g_robotTargets[client][robotIndex] = 0; // Reset this robot's specific target
 
     float tempEnemyPos[3];
     float tempInfectedEyePos[3], tempInfectedOrigin[3];
     int potentialTarget = 0;
 
+    // Priority 1: Unique Special Infected
     potentialTarget = g_playerMainSIenemy[client];
     if (IsValidClient(potentialTarget) && IsPlayerAlive(potentialTarget))
     {
@@ -754,13 +757,13 @@ void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float curr
         }
 
         if (!alreadyClaimedBySibling) {
-            GetClientEyePosition(potentialTarget, tempInfectedEyePos);
+            GetClientEyePosition(potentialTarget, tempInfectedEyePos); // More accurate for SI
             GetClientAbsOrigin(potentialTarget, tempInfectedOrigin);
-            tempEnemyPos[0] = tempInfectedOrigin[0] * 0.4 + tempInfectedEyePos[0] * 0.6;
-            tempEnemyPos[1] = tempInfectedOrigin[1] * 0.4 + tempInfectedEyePos[1] * 0.6;
-            tempEnemyPos[2] = tempInfectedOrigin[2] * 0.4 + tempInfectedEyePos[2] * 0.6;
+            tempEnemyPos[0] = tempInfectedOrigin[0] * 0.3 + tempInfectedEyePos[0] * 0.7; // Bias towards head/upper torso
+            tempEnemyPos[1] = tempInfectedOrigin[1] * 0.3 + tempInfectedEyePos[1] * 0.7;
+            tempEnemyPos[2] = tempInfectedOrigin[2] * 0.3 + tempInfectedEyePos[2] * 0.7;
 
-            if (HasLineOfSight(currentRobotPos, tempEnemyPos, potentialTarget))
+            if (RobotHasClearLOSToTarget(client, robotIndex, currentRobotPos, tempEnemyPos, potentialTarget))
             {
                 g_robotTargets[client][robotIndex] = potentialTarget;
                 targetAcquired = true;
@@ -772,6 +775,7 @@ void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float curr
         }
     }
 
+    // Priority 2: Unique Common Infected (if no unique SI found)
     if (!targetAcquired) {
         potentialTarget = g_playerMainCIenemy[client];
         if (RealValidEntity(potentialTarget) && GetEntProp(potentialTarget, Prop_Data, "m_iHealth") > 0) {
@@ -785,8 +789,8 @@ void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float curr
 
             if (!alreadyClaimedBySibling) {
                 GetEntPropVector(potentialTarget, Prop_Send, "m_vecOrigin", tempEnemyPos);
-                tempEnemyPos[2] += 20.0;
-                if (HasLineOfSight(currentRobotPos, tempEnemyPos, potentialTarget))
+                tempEnemyPos[2] += 25.0; // Aim for center mass of common infected
+                if (RobotHasClearLOSToTarget(client, robotIndex, currentRobotPos, tempEnemyPos, potentialTarget))
                 {
                     g_robotTargets[client][robotIndex] = potentialTarget;
                     targetAcquired = true;
@@ -797,37 +801,41 @@ void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float curr
                 }
             }
         } else if (RealValidEntity(potentialTarget)) {
-             g_playerMainCIenemy[client] = 0;
+             g_playerMainCIenemy[client] = 0; // Clear global if invalid
         }
     }
 
+    // Priority 3: Any Special Infected (if no unique target found yet)
     if (!targetAcquired) {
         potentialTarget = g_playerMainSIenemy[client];
         if (IsValidClient(potentialTarget) && IsPlayerAlive(potentialTarget)) {
             GetClientEyePosition(potentialTarget, tempInfectedEyePos);
             GetClientAbsOrigin(potentialTarget, tempInfectedOrigin);
-            tempEnemyPos[0] = tempInfectedOrigin[0] * 0.4 + tempInfectedEyePos[0] * 0.6;
-            tempEnemyPos[1] = tempInfectedOrigin[1] * 0.4 + tempInfectedEyePos[1] * 0.6;
-            tempEnemyPos[2] = tempInfectedOrigin[2] * 0.4 + tempInfectedEyePos[2] * 0.6;
-            if (HasLineOfSight(currentRobotPos, tempEnemyPos, potentialTarget)) {
+            tempEnemyPos[0] = tempInfectedOrigin[0] * 0.3 + tempInfectedEyePos[0] * 0.7;
+            tempEnemyPos[1] = tempInfectedOrigin[1] * 0.3 + tempInfectedEyePos[1] * 0.7;
+            tempEnemyPos[2] = tempInfectedOrigin[2] * 0.3 + tempInfectedEyePos[2] * 0.7;
+            if (RobotHasClearLOSToTarget(client, robotIndex, currentRobotPos, tempEnemyPos, potentialTarget)) {
                 g_robotTargets[client][robotIndex] = potentialTarget;
                 targetAcquired = true;
                 for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
             }
         }
-        if (!targetAcquired) {
-            potentialTarget = g_playerMainCIenemy[client];
-            if (RealValidEntity(potentialTarget) && GetEntProp(potentialTarget, Prop_Data, "m_iHealth") > 0) {
-                 GetEntPropVector(potentialTarget, Prop_Send, "m_vecOrigin", tempEnemyPos);
-                 tempEnemyPos[2] += 20.0;
-                 if (HasLineOfSight(currentRobotPos, tempEnemyPos, potentialTarget)) {
-                    g_robotTargets[client][robotIndex] = potentialTarget;
-                    targetAcquired = true;
-                    for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
-                 }
-            }
+    }
+
+    // Priority 4: Any Common Infected (if still no target)
+    if (!targetAcquired) {
+        potentialTarget = g_playerMainCIenemy[client];
+        if (RealValidEntity(potentialTarget) && GetEntProp(potentialTarget, Prop_Data, "m_iHealth") > 0) {
+             GetEntPropVector(potentialTarget, Prop_Send, "m_vecOrigin", tempEnemyPos);
+             tempEnemyPos[2] += 25.0;
+             if (RobotHasClearLOSToTarget(client, robotIndex, currentRobotPos, tempEnemyPos, potentialTarget)) {
+                g_robotTargets[client][robotIndex] = potentialTarget;
+                targetAcquired = true;
+                for(int k=0; k<3; k++) enemyAimPos[k] = tempEnemyPos[k];
+             }
         }
     }
+
 
     if (targetAcquired)
     {
@@ -840,11 +848,12 @@ void Robot_UpdateAimingAndTargeting(int client, int robotIndex, const float curr
         GetClientEyeAngles(client, playerEyeAngles);
         robotTargetAngles[client][robotIndex][0] = playerEyeAngles[0];
         robotTargetAngles[client][robotIndex][1] = playerEyeAngles[1];
-        robotTargetAngles[client][robotIndex][2] = 0.0;
+        robotTargetAngles[client][robotIndex][2] = 0.0; // Robots don't roll
     }
 
-    g_robotCurrentAngles[client][robotIndex][0] = LerpAngle(g_robotCurrentAngles[client][robotIndex][0], robotTargetAngles[client][robotIndex][0], 0.25);
-    g_robotCurrentAngles[client][robotIndex][1] = LerpAngle(g_robotCurrentAngles[client][robotIndex][1], robotTargetAngles[client][robotIndex][1], 0.25);
+    // Smooth aiming
+    g_robotCurrentAngles[client][robotIndex][0] = LerpAngle(g_robotCurrentAngles[client][robotIndex][0], robotTargetAngles[client][robotIndex][0], 0.35); // Slightly faster pitch
+    g_robotCurrentAngles[client][robotIndex][1] = LerpAngle(g_robotCurrentAngles[client][robotIndex][1], robotTargetAngles[client][robotIndex][1], 0.35); // Slightly faster yaw
     g_robotCurrentAngles[client][robotIndex][2] = 0.0;
 }
 
@@ -862,20 +871,20 @@ void Robot_HandleCombat(int client, int robotIndex, float currenttime, bool targ
                 EmitSoundToAll(SOUNDREADY, robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_TRAFFIC, _, SNDVOL_NORMAL, _, _, currentRobotPos, NULL_VECTOR, true, 0.0);
             }
             else if (weaponloaddisrupt[weapontypes[client][robotIndex]])
-            {
+            { // For weapons that reload one shell at a time
                 EmitSoundToAll(SOUNDRELOAD, robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_TRAFFIC, _, SNDVOL_NORMAL, _, _, currentRobotPos, NULL_VECTOR, true, 0.0);
-                reloadtime[client][robotIndex] = currenttime;
+                reloadtime[client][robotIndex] = currenttime; // Reset for next shell
             }
         }
     }
-    else
+    else // Not reloading
     {
         if (bullet[client][robotIndex] <= 0)
         {
             reloading[client][robotIndex] = true;
             reloadtime[client][robotIndex] = currenttime;
             EmitSoundToAll(SOUNDCLIPEMPTY, robots[client][robotIndex], SNDCHAN_WEAPON, SNDLEVEL_TRAFFIC, _, SNDVOL_NORMAL, _, _, currentRobotPos, NULL_VECTOR, true, 0.0);
-            if (!weaponloaddisrupt[weapontypes[client][robotIndex]]) bullet[client][robotIndex] = 0;
+            if (!weaponloaddisrupt[weapontypes[client][robotIndex]]) bullet[client][robotIndex] = 0; // Ensure it's 0 for non-disruptable full reloads
         }
     }
 
@@ -899,7 +908,7 @@ public void OnGameFrame()
 
 	float currenttime = GetEngineTime();
 	float duration = currenttime - s_lastFrameTime;
-	if (duration <= 0.0 || duration > 0.2) duration = 0.033;
+	if (duration <= 0.0 || duration > 0.2) duration = 0.033; // Clamp duration
 	s_lastFrameTime = currenttime;
 
 	for (int client = 1; client <= MaxClients; client++)
@@ -924,16 +933,19 @@ public void OnGameFrame()
 		    }
 		}
 
+		// Player-level scanning
 		if (currenttime - scantime[client] > (0.1 > robot_reactiontime_cvar ? 0.1 : robot_reactiontime_cvar))
 		{
 			scantime[client] = currenttime;
 			float playerEyePos[3];
 			GetClientEyePosition(client, playerEyePos);
-			g_playerMainSIenemy[client] = ScanEnemy(client, playerEyePos, -1);
-			g_playerMainCIenemy[client] = ScanCommon(client, playerEyePos, -1);
+			// Pass client as ignoredEntityForLOS for player scans, so player isn't blocked by self.
+			g_playerMainSIenemy[client] = ScanEnemy(client, playerEyePos, client);
+			g_playerMainCIenemy[client] = ScanCommon(client, playerEyePos, client);
 		}
 	}
 
+	// Robot logic (movement, aiming, firing)
 	for (int client = 1; client <= MaxClients; client++)
 	{
 		if (IsValidClient(client) && IsPlayerAlive(client)) {
@@ -945,14 +957,14 @@ public void OnGameFrame()
 int ScanCommon(int client, float rpos[3], int ignoredEntityForLOS)
 {
 #pragma unused client
-    float infectedpos[3], vec[3], angle[3];
+    float infectedpos[3];
     int find = 0;
     float mindis = robot_scanrange_cvar;
     
     for (int i = MaxClients+1; i <= GetMaxEntities(); i++)
     {
         if (!RealValidEntity(i)) continue;
-        static char classname[9];
+        static char classname[32]; // Increased size for safety
         GetEntityClassname(i, classname, sizeof(classname));
         if (!StrEqual(classname, "infected")) continue;
         
@@ -960,15 +972,16 @@ int ScanCommon(int client, float rpos[3], int ignoredEntityForLOS)
         if (health <= 0) continue;
         
         GetEntPropVector(i, Prop_Data, "m_vecOrigin", infectedpos);
+        infectedpos[2] += 25.0; // Adjust scan height towards center mass
         float dis = GetVectorDistance(rpos, infectedpos);
         
         if (dis < mindis)
         {
-            SubtractVectors(infectedpos, rpos, vec);
-            GetVectorAngles(vec, angle);
-            TR_TraceRayFilter(rpos, infectedpos, MASK_SOLID|MASK_PLAYERSOLID, RayType_EndPoint, TraceRayDontHitSelfAndLive, ignoredEntityForLOS);
+            Handle trace = TR_TraceRayFilterEx(rpos, infectedpos, MASK_SOLID|MASK_PLAYERSOLID, RayType_EndPoint, PlayerScanLOSFilter, ignoredEntityForLOS);
+            bool hit = TR_DidHit(trace);
+            CloseHandle(trace);
             
-            if (!TR_DidHit())
+            if (!hit)
             {
                 find = i;
                 mindis = dis;
@@ -981,7 +994,7 @@ int ScanCommon(int client, float rpos[3], int ignoredEntityForLOS)
 int ScanEnemy(int client, float rpos[3], int ignoredEntityForLOS)
 {
 #pragma unused client
-    float infectedpos[3], vec[3], angle[3];
+    float infectedpos[3], infectedOrigin[3];
     int find = 0;
     float mindis = robot_scanrange_cvar;
     
@@ -989,16 +1002,22 @@ int ScanEnemy(int client, float rpos[3], int ignoredEntityForLOS)
     {
         if (IsValidClient(i) && GetClientTeam(i) == 3 && IsPlayerAlive(i))
         {
-            GetClientAbsOrigin(i, infectedpos);
+            GetClientEyePosition(i, infectedpos); // Target SI eye position for more accurate LOS
+            GetClientAbsOrigin(i, infectedOrigin);
+            // Blend for a center-mass like position, biased towards eyes
+            infectedpos[0] = infectedOrigin[0] * 0.3 + infectedpos[0] * 0.7;
+            infectedpos[1] = infectedOrigin[1] * 0.3 + infectedpos[1] * 0.7;
+            infectedpos[2] = infectedOrigin[2] * 0.3 + infectedpos[2] * 0.7;
+
             float dis = GetVectorDistance(rpos, infectedpos);
             
             if (dis < mindis)
             {
-                SubtractVectors(infectedpos, rpos, vec);
-                GetVectorAngles(vec, angle);
-                TR_TraceRayFilter(rpos, infectedpos, MASK_SOLID|MASK_PLAYERSOLID, RayType_EndPoint, TraceRayDontHitSelfAndLive, ignoredEntityForLOS);
+                Handle trace = TR_TraceRayFilterEx(rpos, infectedpos, MASK_SOLID|MASK_PLAYERSOLID, RayType_EndPoint, PlayerScanLOSFilter, ignoredEntityForLOS);
+                bool hit = TR_DidHit(trace);
+                CloseHandle(trace);
                 
-                if (!TR_DidHit())
+                if (!hit)
                 {
                     find = i;
                     mindis = dis;
@@ -1009,15 +1028,81 @@ int ScanEnemy(int client, float rpos[3], int ignoredEntityForLOS)
     return find;
 }
 
-bool TraceRayDontHitSelfAndLive(int entity, int contentsMask, any data)
+// Simplified LOS check for robots to a specific target.
+// Returns true if LOS is clear, false otherwise.
+// It ignores the robot itself and other survivors.
+bool RobotHasClearLOSToTarget(int robotOwnerClient, int robotIndex, const float robotPos[3], const float targetPos[3], int targetEnt)
+{
+    // Prepare data for the trace filter: robotEnt is data[0], targetEnt is data[1]
+    int filterData[2];
+    filterData[0] = robots[robotOwnerClient][robotIndex]; // Pass the actual robot entity
+    filterData[1] = targetEnt;
+
+    Handle trace = TR_TraceRayFilterEx(robotPos, targetPos, MASK_SHOT_HULL, RayType_EndPoint, RobotDirectLOSFilter, filterData);
+    bool didHit = TR_DidHit(trace);
+    int hitEntity = -1;
+    if (didHit) {
+        hitEntity = TR_GetEntityIndex(trace);
+    }
+    CloseHandle(trace);
+
+    // If we didn't hit anything, LOS is clear.
+    if (!didHit) return true;
+
+    // If we hit something, check if it was the intended target.
+    if (hitEntity == targetEnt) return true;
+
+    // Otherwise, LOS is blocked by something else.
+    return false;
+}
+
+// Filter for RobotHasClearLOSToTarget
+// data[0] = robotEnt (to ignore)
+// data[1] = targetEnt (to allow hitting, effectively making it not a blocker)
+public bool RobotDirectLOSFilter(int entityHit, int contentsMask, any data)
 {
 #pragma unused contentsMask
-    if (data != -1 && entity == data) return false;
+    int robotEnt = view_as<int[]>(data)[0];
+    int targetEnt = view_as<int[]>(data)[1];
 
-    if (IsValidClient(entity))
-    {
-        if(GetClientTeam(entity) == 2) return false;
+    if (entityHit == robotEnt) return false; // Don't block if we hit the shooting robot
+    if (entityHit == targetEnt) return false; // Don't block if we hit the intended target
+
+    // Block if we hit another survivor
+    if (IsValidClient(entityHit) && GetClientTeam(entityHit) == 2) return true;
+
+    // For other entities (world, other infected), they *should* block LOS.
+    // MASK_SHOT_HULL should cover most of these.
+    // The function should return true if the entityHit *should* block the ray.
+    return true;
+}
+
+
+// This filter is used by the main ScanCommon/ScanEnemy (player-level scans).
+// 'data' is ignoredEntityForLOS (usually -1 or the player if scanning from player eyes).
+// We want to find targets, so we don't block on targets, but do block on actual cover.
+// Returns 'true' if the entity should BLOCK the trace, 'false' if it should NOT block.
+bool PlayerScanLOSFilter(int entity, int contentsMask, any data)
+{
+#pragma unused contentsMask
+    int ignoredEntity = view_as<int>(data);
+    if (ignoredEntity != -1 && entity == ignoredEntity) return false; // Don't block self (e.g. player who is scanning)
+
+    // Don't block if we hit an SI (these are potential targets)
+    if (IsValidClient(entity) && GetClientTeam(entity) == 3) return false;
+
+    // Don't block if we hit a Common Infected or Witch (potential targets)
+    if (RealValidEntity(entity)) {
+        char classname[32];
+        GetEntityClassname(entity, classname, sizeof(classname));
+        if (StrEqual(classname, "infected") || StrEqual(classname, "witch")) return false;
     }
+
+    // Block other survivors if they are in the way during player scan
+    // (unless the survivor is the one being ignored, e.g. if scanning for self)
+    if (IsValidClient(entity) && GetClientTeam(entity) == 2 && entity != ignoredEntity) return true;
+
+    // For anything else hit (world geometry, physics props, etc.), it's considered a blocker.
     return true;
 }
 
@@ -1113,7 +1198,7 @@ void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], const
     
     GetAngleVectors(vAngles, fwd, right, up);
     
-    for (int k = 0; k < 3; k++) firePos[k] = botOrigin[k] + (fwd[k] * 20.0) + (up[k] * 5.0);
+    for (int k = 0; k < 3; k++) firePos[k] = botOrigin[k] + (fwd[k] * 20.0) + (up[k] * 5.0); // Barrel offset
      
     spreadRange1 = 0.0 - bulletaccuracy[weapontypes[client][robotIndex]];
     spreadRange2 = bulletaccuracy[weapontypes[client][robotIndex]];
@@ -1122,7 +1207,7 @@ void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], const
     {
         vAngles2[0] = vAngles[0] + GetRandomFloat(spreadRange1, spreadRange2);
         vAngles2[1] = vAngles[1] + GetRandomFloat(spreadRange1, spreadRange2);
-        vAngles2[2] = vAngles[2];
+        vAngles2[2] = vAngles[2]; // No spread on roll
         
         int hitTargetEnt = 0;
         float damageToDeal = StringToFloat(weaponbulletdamagestr[weapontypes[client][robotIndex]]);
@@ -1133,6 +1218,7 @@ void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], const
 
         while(penetrations < maxPenetrations)
         {
+            // Pass the robot's entity index to ignore itself in the trace
             TR_TraceRayFilter(traceStartPos, vAngles2, MASK_SHOT_HULL, RayType_Infinite, TraceRayIgnoreSelfAndSurvivors, robots[client][robotIndex]);
             
             if (TR_DidHit())
@@ -1161,20 +1247,20 @@ void FireBullet(int client, int robotIndex, const float enemyTargetPos[3], const
                             float hitDir[3];
                             GetAngleVectors(vAngles2, hitDir, NULL_VECTOR, NULL_VECTOR);
                             ScaleVector(hitDir, 1.0);
-                            AddVectors(endPos, hitDir, traceStartPos);
-                            damageToDeal *= 0.75;
-                            if(damageToDeal < 5.0) break;
+                            AddVectors(endPos, hitDir, traceStartPos); // Start next trace from hit point
+                            damageToDeal *= 0.75; // Damage reduction for penetration
+                            if(damageToDeal < 5.0) break; // Stop if damage is too low
                             continue;
                         }
                     }
                 }
-                break;
+                break; // Stop if hit non-penetrable or non-target
             }
-            else
+            else // No hit
             {
                 float farEnd[3];
                 float traceDir[3]; GetAngleVectors(vAngles2, traceDir, NULL_VECTOR, NULL_VECTOR);
-                ScaleVector(traceDir, 3000.0);
+                ScaleVector(traceDir, 3000.0); // Max range for beam effect
                 AddVectors(traceStartPos, traceDir, farEnd);
                 TE_SetupBeamPoints(traceStartPos, farEnd, g_sprite, 0, 0, 0, 0.07, 0.1, 0.8, 1, 0.0, {200,200,200,230}, 0);
                 TE_SendToAll();
@@ -1193,53 +1279,15 @@ float LerpAngle(float current, float target, float speed)
     return current + diff * speed;
 }
 
-// HasLineOfSight: start, end, and targetEntity are read-only within this scope.
-bool HasLineOfSight(const float start[3], const float end[3], int targetEntity)
-{
-    Handle trace = TR_TraceRayFilterEx(start, end, MASK_VISIBLE_AND_NPCS, RayType_EndPoint, RobotLOSFilter, targetEntity);
-    bool didHit = TR_DidHit(trace);
-    CloseHandle(trace);
-    return !didHit;
-}
-
-// Filter for HasLineOfSight, 'data' is the targetEntity.
-// We want to see if the path is clear *except* for the target itself.
-public bool RobotLOSFilter(int entityHit, int contentsMask, any data)
-{
-#pragma unused contentsMask
-    int targetEntity = view_as<int>(data);
-    if (entityHit == targetEntity && targetEntity != -1) return false;
-
-    if (IsValidClient(entityHit) && GetClientTeam(entityHit) == 2) return true;
-
-    return true;
-}
-
-// This filter is used by ScanCommon/ScanEnemy. 'data' is ignoredEntityForLOS (the scanning robot or -1).
-bool TraceRayDontHitSelfAndLive(int entity, int contentsMask, any data)
-{
-#pragma unused contentsMask
-    if (data != -1 && entity == data) return false;
-
-    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
-
-    return true;
-}
-
-#pragma unused TraceEntityFilterPlayer
-bool TraceEntityFilterPlayer(int entity, int contentsMask)
-{
-#pragma unused contentsMask
-    return (entity > MaxClients || !entity);
-}
-
 // Filter for FireBullet: 'data' is the firing robot's entity index.
+// Returns true to block, false to not block.
 bool TraceRayIgnoreSelfAndSurvivors(int entity, int contentsMask, any data)
 {
 #pragma unused contentsMask
-    if (entity == data) return false;
-    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false;
-    return true;
+    int firingRobotEnt = view_as<int>(data);
+    if (entity == firingRobotEnt) return false; // Don't block self (the firing robot)
+    if (IsValidClient(entity) && GetClientTeam(entity) == 2) return false; // Don't block other survivors
+    return true; // Block everything else (infected, world, etc.)
 }
 
 public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
@@ -1258,7 +1306,7 @@ public void Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast)
     }
     else if (newTeam == 2 && oldTeam != 2 && IsPlayerAlive(client))
     {
-        CleanupAllRobots(client, true);
+        CleanupAllRobots(client, true); // Clean up any potential old team's entities
         LoadPlayerRobotConfig(client);
     }
 }
@@ -1301,37 +1349,31 @@ void CleanupAllRobots(int client, bool deleteEntities)
     
     if(deleteEntities) {
         char targetname_check[64];
-        char robot_search_name[32];
-        Format(robot_search_name, sizeof(robot_search_name), "robot_%d_", client);
+        char robot_search_name_base[32]; // "robot_CLIENTID_"
+        Format(robot_search_name_base, sizeof(robot_search_name_base), "robot_%d_", client);
 
         int entity = -1;
         while ((entity = FindEntityByClassname(entity, "prop_dynamic_override")) != -1)
         {
-            if (IsValidEntity(entity))
+            if (IsValidEntity(entity)) // Check if the entity handle is still valid
             {
                 if (HasEntProp(entity, Prop_Data, "m_iName"))
                 {
                     GetEntPropString(entity, Prop_Data, "m_iName", targetname_check, sizeof(targetname_check));
-                    if (StrContains(targetname_check, robot_search_name, false) == 0)
+                    // Check if the entity's name starts with "robot_CLIENTID_"
+                    if (StrContains(targetname_check, robot_search_name_base, false) == 0)
                     {
-                        char full_robot_name_pattern[40];
-                        bool matches_a_robot_of_this_client = false;
-                        for(int r_idx=0; r_idx < MAX_ROBOTS_PER_PLAYER; ++r_idx) {
-                            Format(full_robot_name_pattern, sizeof(full_robot_name_pattern), "robot_%d_%d", client, r_idx);
-                            if(StrEqual(targetname_check, full_robot_name_pattern)) {
-                                matches_a_robot_of_this_client = true;
-                                break;
-                            }
-                        }
-                        if(matches_a_robot_of_this_client) {
-                             AcceptEntityInput(entity, "Kill");
-                        }
+                        // Further ensure it's one of *this* plugin's robots by checking full pattern if necessary,
+                        // but usually, the client ID prefix is enough to avoid conflict with other plugins.
+                        // For safety, one could iterate robot indices and match "robot_CLIENTID_ROBOTINDEX"
+                        AcceptEntityInput(entity, "Kill");
                     }
                 }
             }
         }
     }
     
+    // Reset arrays regardless of deleteEntities, as ReleaseRobot already nulled specific entries
     for (int i = 0; i < MAX_ROBOTS_PER_PLAYER; i++)
     {
         robots[client][i] = 0;
@@ -1343,5 +1385,3 @@ void CleanupAllRobots(int client, bool deleteEntities)
 		g_robotTargets[client][i] = 0;
     }
 }
-
-[end of l4d_robot.sp]
